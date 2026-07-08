@@ -1,0 +1,172 @@
+/**
+ * Shared, framework-agnostic types for `better-auth-support`.
+ *
+ * These describe the wire shapes returned by the server endpoints and consumed
+ * by the client plugin and the React reference components. They intentionally
+ * avoid any dependency on `better-auth` internals so they can be imported from
+ * every entry (`/server`, `/client`, `/react`) without leaking server-only
+ * types into the browser bundle.
+ *
+ * Dates cross the wire as ISO strings but are `Date` objects in-process, hence
+ * the `string | Date` unions.
+ */
+
+export type ConversationStatus = "open" | "pending" | "closed";
+
+/**
+ * Who authored a message.
+ * - `visitor` — a pre-auth visitor identified by a signed cookie
+ * - `user`    — an authenticated Better Auth user
+ * - `agent`   — a support agent (a user whose role matches `agentRole`)
+ * - `ai`      — the `aiResponder` first-responder
+ * - `system`  — automated/system events
+ */
+export type MessageAuthorType = "visitor" | "user" | "agent" | "ai" | "system";
+
+export interface SupportConversation {
+  id: string;
+  /** Better Auth user id, when the conversation belongs to a logged-in user. */
+  userId?: string | null;
+  /** Signed-cookie visitor id, for pre-auth visitors. */
+  visitorId?: string | null;
+  status: ConversationStatus;
+  subject?: string | null;
+  /** User id of the agent this conversation is assigned to. */
+  assignedAgentId?: string | null;
+  /** Contact email captured from an anonymous visitor via `identify`. */
+  visitorEmail?: string | null;
+  visitorName?: string | null;
+  lastMessageAt: string | Date;
+  createdAt: string | Date;
+}
+
+export interface SupportMessage {
+  id: string;
+  conversationId: string;
+  authorType: MessageAuthorType;
+  authorId?: string | null;
+  body: string;
+  readAt?: string | Date | null;
+  createdAt: string | Date;
+}
+
+/** A conversation plus its ordered messages — the unit the widget renders. */
+export interface ConversationThread {
+  conversation: SupportConversation | null;
+  messages: SupportMessage[];
+}
+
+/** Minimal Better Auth user fields joined into the agent inbox. */
+export interface InboxUser {
+  id: string;
+  email: string;
+  name: string;
+  role?: string | null;
+}
+
+/** A conversation enriched with the Better Auth identity behind it. */
+export interface InboxItem extends SupportConversation {
+  user: InboxUser | null;
+}
+
+export interface InboxResult {
+  conversations: InboxItem[];
+}
+
+export interface ReplyResult {
+  conversation: SupportConversation;
+  message: SupportMessage;
+}
+
+export interface ConversationResult {
+  conversation: SupportConversation;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Request payloads                                                           */
+/* -------------------------------------------------------------------------- */
+
+export interface SendMessageInput {
+  /** Continue an existing conversation; omit to reuse/open the caller's own. */
+  conversationId?: string;
+  body: string;
+  /** Optional subject, only used when a new conversation is created. */
+  subject?: string;
+}
+
+export interface ConversationQuery {
+  conversationId?: string;
+}
+
+export interface IdentifyInput {
+  email: string;
+  name?: string;
+}
+
+export interface InboxQuery {
+  status?: ConversationStatus;
+  limit?: number;
+}
+
+export interface ReplyInput {
+  conversationId: string;
+  body: string;
+}
+
+export interface AssignInput {
+  conversationId: string;
+  /** Defaults to the acting agent when omitted. */
+  agentId?: string;
+}
+
+export interface CloseInput {
+  conversationId: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Client surface (structural — matches Better Auth's `$fetch` result shape)  */
+/* -------------------------------------------------------------------------- */
+
+/** The `{ data, error }` envelope Better Auth's fetch layer returns. */
+export interface FetchResult<T> {
+  data: T | null;
+  error: {
+    message?: string;
+    status?: number;
+    statusText?: string;
+    code?: string;
+  } | null;
+}
+
+export interface SubscribeOptions {
+  conversationId?: string;
+  /** Poll cadence in ms (default 3000). */
+  intervalMs?: number;
+  onThread: (thread: ConversationThread) => void;
+  onError?: (error: unknown) => void;
+  /** Abort to stop polling (in addition to the returned unsubscribe fn). */
+  signal?: AbortSignal;
+}
+
+export type Unsubscribe = () => void;
+
+/** Agent-only actions, gated server-side by the `agentRole` guard. */
+export interface SupportAgentActions {
+  inbox: (query?: InboxQuery) => Promise<FetchResult<InboxResult>>;
+  reply: (input: ReplyInput) => Promise<FetchResult<ReplyResult>>;
+  assign: (input: AssignInput) => Promise<FetchResult<ConversationResult>>;
+  close: (input: CloseInput) => Promise<FetchResult<ConversationResult>>;
+}
+
+/**
+ * The structural client shape the React components depend on. Any Better Auth
+ * client configured with `supportChatClient()` satisfies this — the components
+ * accept it via a `client` prop so they stay framework-plumbing agnostic.
+ */
+export interface SupportClient {
+  sendMessage: (input: SendMessageInput) => Promise<FetchResult<ConversationThread>>;
+  getConversation: (query?: ConversationQuery) => Promise<FetchResult<ConversationThread>>;
+  identify?: (input: IdentifyInput) => Promise<FetchResult<ConversationResult>>;
+  subscribe?: (options: SubscribeOptions) => Unsubscribe;
+  agent?: SupportAgentActions;
+}
