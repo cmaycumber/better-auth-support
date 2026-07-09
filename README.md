@@ -7,7 +7,7 @@ itself — no separate user system, no HMAC identity bridge. It composes with th
 first and escalate to a human, with the visitor's email/plan/usage already attached.
 
 - **Headless core** — a Better Auth server plugin + client plugin (endpoints + typed actions).
-- **Reference UI** — an unstyled floating `<SupportWidget/>` for visitors and a full two-pane
+- **Reference UI** — an unstyled floating `<SupportChatWidget/>` for visitors and a full two-pane
   `<SupportDashboard/>` support console for agents, React-only.
 - **AI-first-responder** — bring your own `aiResponder`; reply to auto-answer, `null` to escalate.
 - **Admin-plugin gating** — agent endpoints are role-gated (`agentRole`, default `"admin"`).
@@ -32,7 +32,7 @@ Sub-path exports:
 | --- | --- |
 | `better-auth-support/server` | `support(opts?)` — the Better Auth server plugin + option/model types |
 | `better-auth-support/client` | `supportClient()` — the Better Auth client plugin (typed actions) |
-| `better-auth-support/react` | `useSupportChat()` + `<SupportWidget/>` (visitor); `useSupportInbox()` + `<SupportDashboard/>` + `<AgentInbox/>` (agent) |
+| `better-auth-support/react` | `useSupportChat()` + `<SupportChatWidget/>` (visitor); `useSupportInbox()` + `<SupportDashboard/>` + `<AgentInbox/>` (agent) |
 
 ## Quick start
 
@@ -83,8 +83,9 @@ export const authClient = createAuthClient({
   plugins: [supportClient()],
 });
 
-// authClient.sendMessage(...), authClient.getConversation(...), authClient.subscribe(...)
-// authClient.agent.inbox() / stats() / reply() / assign() / close()
+// Actions are namespaced into `chat` (visitor/user) and `agent` (role-gated):
+// authClient.chat.send(...), authClient.chat.conversation(...), authClient.chat.subscribe(...)
+// authClient.agent.inbox() / conversation() / stats() / reply() / assign() / close()
 ```
 
 ### 3. UI — drop in the reference widget
@@ -92,11 +93,11 @@ export const authClient = createAuthClient({
 ```tsx
 // app/layout.tsx (or anywhere in your tree)
 "use client";
-import { SupportWidget } from "better-auth-support/react";
+import { SupportChatWidget } from "better-auth-support/react";
 import { authClient } from "@/lib/auth-client";
 
 export function ChatBubble() {
-  return <SupportWidget client={authClient} title="Support" accentColor="#2563eb" />;
+  return <SupportChatWidget client={authClient} title="Support" accentColor="#2563eb" />;
 }
 ```
 
@@ -149,7 +150,7 @@ export default function SupportConsole() {
 
 What it renders:
 
-- **Overview stat row** — open / pending / closed / total conversation counts (from `/support/stats`).
+- **Overview stat row** — open / pending / closed / total conversation counts (from `/support/agent/stats`).
 - **Conversation list** — status filter tabs (all / open / pending / closed), an unread indicator
   (the latest message is inbound and awaiting a reply), the visitor's identity/email, a
   last-message preview, and the assigned agent.
@@ -193,23 +194,30 @@ and status filters.
 
 ## Endpoints
 
-Visitor/user (session **or** signed visitor cookie):
+Endpoints are grouped into a `chat` (visitor/user) and an `agent` (role-gated) namespace, matching
+the client action groups.
 
-- `POST /support/message` — send a message (find-or-create the caller's conversation).
-- `GET  /support/conversation` — the caller's conversation + messages.
-- `POST /support/identify` — attach an email/name to an anonymous visitor.
+Chat — visitor/user (session **or** signed visitor cookie):
+
+- `POST /support/chat/message` — send a message (find-or-create the caller's conversation).
+- `GET  /support/chat/conversation` — the caller's own conversation + messages.
+- `GET  /support/chat/stream` — the caller's latest thread snapshot; the `chat.subscribe` poll loop
+  hits this (reserved as the mount point for a real SSE transport later).
+- `POST /support/chat/identify` — attach an email/name to an anonymous visitor.
 
 Agent (role-gated by `agentRole`):
 
-- `GET  /support/inbox` — conversations joined to the Better Auth `user`, enriched with the assigned
-  agent, a last-message preview, and an unread flag. Supports `status` filtering plus `limit`/`offset`
-  pagination; returns `{ conversations, total }`.
-- `GET  /support/stats` — conversation counts by status (`{ open, pending, closed, total }`).
-- `POST /support/reply` — reply (auto-assigns the conversation to the replying agent).
-- `POST /support/assign` — assign a conversation to an agent (defaults to self).
-- `POST /support/close` — close a conversation.
+- `GET  /support/agent/inbox` — conversations joined to the Better Auth `user`, enriched with the
+  assigned agent, a last-message preview, and an unread flag. Supports `status` filtering plus
+  `limit`/`offset` pagination; returns `{ conversations, total }`.
+- `GET  /support/agent/conversation` — read any conversation by id (needed by the console).
+- `GET  /support/agent/stats` — conversation counts by status (`{ open, pending, closed, total }`).
+- `POST /support/agent/reply` — reply (auto-assigns the conversation to the replying agent).
+- `POST /support/agent/assign` — assign a conversation to an agent (defaults to self).
+- `POST /support/agent/close` — close a conversation.
 
-`/support/message` and `/support/identify` are rate-limited via the plugin's `rateLimit` rules.
+`/support/chat/message` and `/support/chat/identify` are rate-limited via the plugin's `rateLimit`
+rules.
 
 ## Headless hook
 
@@ -222,10 +230,10 @@ const {
 } = useSupportChat({ client: authClient, pollIntervalMs: 3000 });
 ```
 
-The client plugin also exposes a poll-based `subscribe`:
+The client plugin also exposes a poll-based `chat.subscribe`:
 
 ```ts
-const unsubscribe = authClient.subscribe({
+const unsubscribe = authClient.chat.subscribe({
   conversationId,
   intervalMs: 3000,
   onThread: (thread) => render(thread),
@@ -247,8 +255,8 @@ Conversations link to `user.id` so the inbox can join to the user's email/plan/r
 
 ## Caveats
 
-- **Realtime is polling in v0.** Clients re-fetch `/support/conversation` (and the dashboard
-  re-fetches `/support/inbox` + `/support/stats`) on an interval. This is deliberately
+- **Realtime is polling in v0.** Clients poll `/support/chat/stream` (and the dashboard
+  re-fetches `/support/agent/inbox` + `/support/agent/stats`) on an interval. This is deliberately
   **serverless-safe** — long-lived SSE connections are awkward on Lambda/SST/Vercel. A pluggable
   SSE + pub-sub (Redis/Ably) transport is planned for self-hosters who can run persistent
   connections; `realtime: "sse"` is reserved for it and currently polls.

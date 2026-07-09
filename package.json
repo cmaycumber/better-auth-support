@@ -1,6 +1,6 @@
 {
   "name": "better-auth-support",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hosted, embeddable support chat + agent dashboard that plugs directly into a Better Auth app. Identity, users and agent roles come from Better Auth itself; ships an AI-first-responder hook, a headless React chat widget, and a full support console.",
   "author": "Automatons, LLC",
   "license": "MIT",

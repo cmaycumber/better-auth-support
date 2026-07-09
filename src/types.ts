@@ -169,9 +169,18 @@ export interface SubscribeOptions {
 
 export type Unsubscribe = () => void;
 
+/** Visitor/user chat actions — session or signed visitor cookie. */
+export interface SupportChatActions {
+  send: (input: SendMessageInput) => Promise<FetchResult<ConversationThread>>;
+  conversation: (query?: ConversationQuery) => Promise<FetchResult<ConversationThread>>;
+  identify?: (input: IdentifyInput) => Promise<FetchResult<ConversationResult>>;
+  subscribe?: (options: SubscribeOptions) => Unsubscribe;
+}
+
 /** Agent-only actions, gated server-side by the `agentRole` guard. */
 export interface SupportAgentActions {
   inbox: (query?: InboxQuery) => Promise<FetchResult<InboxResult>>;
+  conversation: (query: ConversationQuery) => Promise<FetchResult<ConversationThread>>;
   stats: () => Promise<FetchResult<SupportStats>>;
   reply: (input: ReplyInput) => Promise<FetchResult<ReplyResult>>;
   assign: (input: AssignInput) => Promise<FetchResult<ConversationResult>>;
@@ -182,11 +191,11 @@ export interface SupportAgentActions {
  * The structural client shape the React components depend on. Any Better Auth
  * client configured with `supportClient()` satisfies this — the components
  * accept it via a `client` prop so they stay framework-plumbing agnostic.
+ *
+ * Actions are namespaced: `chat.*` for visitors/users, `agent.*` for agents
+ * (present only when the caller is configured as an agent client).
  */
 export interface SupportClient {
-  sendMessage: (input: SendMessageInput) => Promise<FetchResult<ConversationThread>>;
-  getConversation: (query?: ConversationQuery) => Promise<FetchResult<ConversationThread>>;
-  identify?: (input: IdentifyInput) => Promise<FetchResult<ConversationResult>>;
-  subscribe?: (options: SubscribeOptions) => Unsubscribe;
+  chat: SupportChatActions;
   agent?: SupportAgentActions;
 }

@@ -7,7 +7,7 @@
  * a human on `null`. Agent endpoints are role-gated (composes with the Better
  * Auth `admin` plugin).
  *
- * Realtime is poll-based in v0: clients re-fetch `/support/conversation`.
+ * Realtime is poll-based in v0: clients poll `/support/chat/stream`.
  * See the README for the serverless/SSE caveats.
  */
 import type { GenericEndpointContext, BetterAuthPlugin } from "@better-auth/core";
@@ -15,6 +15,7 @@ import { APIError, createAuthEndpoint, getSessionFromCtx, sessionMiddleware } fr
 
 import type {
   ConversationStatus,
+  ConversationThread,
   InboxItem,
   InboxUser,
   SupportConversation,
@@ -256,6 +257,38 @@ async function resolveInboxUser(
   return user;
 }
 
+/**
+ * Load the calling visitor/user's own conversation thread. Resolves the actor,
+ * then returns either the conversation named by `conversationId` (only when the
+ * actor owns it) or the actor's most recent conversation. Shared by the
+ * `chat.conversation` and `chat.stream` (poll-tick) endpoints.
+ */
+async function loadOwnThread(
+  ctx: GenericEndpointContext,
+  allowAnonymous: boolean,
+  conversationId: string | undefined,
+): Promise<ConversationThread> {
+  const adapter = ctx.context.adapter;
+  const actor = await resolveActor(ctx, allowAnonymous, false);
+  if (!actor) return { conversation: null, messages: [] };
+
+  let conversation: SupportConversation | null;
+  if (conversationId) {
+    conversation = await findConversationById(adapter, conversationId);
+    const owns =
+      conversation &&
+      (actor.kind === "user"
+        ? conversation.userId === actor.id
+        : conversation.visitorId === actor.id);
+    if (!owns) conversation = null;
+  } else {
+    conversation = await findActorConversation(adapter, actor);
+  }
+
+  if (!conversation) return { conversation: null, messages: [] };
+  return { conversation, messages: await loadMessages(adapter, conversation.id) };
+}
+
 /** Patch a conversation and bump `lastMessageAt`. Returns the fresh row. */
 async function updateConversation(
   adapter: Adapter,
@@ -333,8 +366,8 @@ export const support = (opts: SupportOptions = {}) => {
     },
     endpoints: {
       /* ---- visitor / user ------------------------------------------------ */
-      sendMessage: createAuthEndpoint(
-        "/support/message",
+      chatMessage: createAuthEndpoint(
+        "/support/chat/message",
         {
           method: "POST",
           metadata: {
@@ -433,48 +466,49 @@ export const support = (opts: SupportOptions = {}) => {
         },
       ),
 
-      getConversation: createAuthEndpoint(
-        "/support/conversation",
+      chatConversation: createAuthEndpoint(
+        "/support/chat/conversation",
         {
           method: "GET",
           metadata: { $Infer: { query: {} as { conversationId?: string } } },
         },
+        async (ctx) => ctx.json(await loadOwnThread(ctx, allowAnonymous, ctx.query?.conversationId)),
+      ),
+
+      chatStream: createAuthEndpoint(
+        "/support/chat/stream",
+        {
+          method: "GET",
+          metadata: { $Infer: { query: {} as { conversationId?: string } } },
+        },
+        // Poll-tick endpoint: returns the caller's latest thread snapshot. The
+        // client `chat.subscribe` action polls this. It shares `chat.conversation`'s
+        // handler today and is reserved as the mount point for a real SSE
+        // transport later (see the realtime caveat in the README).
+        async (ctx) => ctx.json(await loadOwnThread(ctx, allowAnonymous, ctx.query?.conversationId)),
+      ),
+
+      agentConversation: createAuthEndpoint(
+        "/support/agent/conversation",
+        {
+          method: "GET",
+          use: [sessionMiddleware],
+          metadata: { $Infer: { query: {} as { conversationId?: string } } },
+        },
         async (ctx) => {
+          requireAgent(ctx);
           const adapter = ctx.context.adapter;
           const conversationId = ctx.query?.conversationId;
+          if (!conversationId) return ctx.json({ conversation: null, messages: [] });
 
-          // Agents may read any conversation by id (needed by the inbox UI).
-          const session = await getSessionFromCtx(ctx, { disableRefresh: true });
-          const asAgent = !!session?.user && isAgent(readRole(session.user), agentRole);
-          if (conversationId && asAgent) {
-            const conversation = await findConversationById(adapter, conversationId);
-            if (!conversation) return ctx.json({ conversation: null, messages: [] });
-            return ctx.json({ conversation, messages: await loadMessages(adapter, conversation.id) });
-          }
-
-          const actor = await resolveActor(ctx, allowAnonymous, false);
-          if (!actor) return ctx.json({ conversation: null, messages: [] });
-
-          let conversation: SupportConversation | null;
-          if (conversationId) {
-            conversation = await findConversationById(adapter, conversationId);
-            const owns =
-              conversation &&
-              (actor.kind === "user"
-                ? conversation.userId === actor.id
-                : conversation.visitorId === actor.id);
-            if (!owns) conversation = null;
-          } else {
-            conversation = await findActorConversation(adapter, actor);
-          }
-
+          const conversation = await findConversationById(adapter, conversationId);
           if (!conversation) return ctx.json({ conversation: null, messages: [] });
           return ctx.json({ conversation, messages: await loadMessages(adapter, conversation.id) });
         },
       ),
 
-      identify: createAuthEndpoint(
-        "/support/identify",
+      chatIdentify: createAuthEndpoint(
+        "/support/chat/identify",
         {
           method: "POST",
           metadata: { $Infer: { body: {} as { email: string; name?: string } } },
@@ -503,8 +537,8 @@ export const support = (opts: SupportOptions = {}) => {
       ),
 
       /* ---- agent (role-gated) ------------------------------------------- */
-      inbox: createAuthEndpoint(
-        "/support/inbox",
+      agentInbox: createAuthEndpoint(
+        "/support/agent/inbox",
         {
           method: "GET",
           use: [sessionMiddleware],
@@ -557,8 +591,8 @@ export const support = (opts: SupportOptions = {}) => {
         },
       ),
 
-      stats: createAuthEndpoint(
-        "/support/stats",
+      agentStats: createAuthEndpoint(
+        "/support/agent/stats",
         {
           method: "GET",
           use: [sessionMiddleware],
@@ -582,8 +616,8 @@ export const support = (opts: SupportOptions = {}) => {
         },
       ),
 
-      reply: createAuthEndpoint(
-        "/support/reply",
+      agentReply: createAuthEndpoint(
+        "/support/agent/reply",
         {
           method: "POST",
           use: [sessionMiddleware],
@@ -615,8 +649,8 @@ export const support = (opts: SupportOptions = {}) => {
         },
       ),
 
-      assign: createAuthEndpoint(
-        "/support/assign",
+      agentAssign: createAuthEndpoint(
+        "/support/agent/assign",
         {
           method: "POST",
           use: [sessionMiddleware],
@@ -643,8 +677,8 @@ export const support = (opts: SupportOptions = {}) => {
         },
       ),
 
-      close: createAuthEndpoint(
-        "/support/close",
+      agentClose: createAuthEndpoint(
+        "/support/agent/close",
         {
           method: "POST",
           use: [sessionMiddleware],
@@ -672,8 +706,8 @@ export const support = (opts: SupportOptions = {}) => {
       ),
     },
     rateLimit: [
-      { pathMatcher: (path: string) => path === "/support/message", max: 20, window: 60 },
-      { pathMatcher: (path: string) => path === "/support/identify", max: 10, window: 60 },
+      { pathMatcher: (path: string) => path === "/support/chat/message", max: 20, window: 60 },
+      { pathMatcher: (path: string) => path === "/support/chat/identify", max: 10, window: 60 },
     ],
   } satisfies BetterAuthPlugin;
 };

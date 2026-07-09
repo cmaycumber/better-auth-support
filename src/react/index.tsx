@@ -2,7 +2,7 @@
  * `better-auth-support/react` — headless hooks + reference UI.
  *
  * Visitor side: `useSupportChat()` is the headless core (state + poll-based
- * realtime) and `<SupportWidget/>` is the floating bubble.
+ * realtime) and `<SupportChatWidget/>` is the floating bubble.
  *
  * Agent side: `useSupportInbox()` is the headless console core and
  * `<SupportDashboard/>` is a full two-pane support console (list + thread +
@@ -96,7 +96,7 @@ export function useSupportChat(options: UseSupportChatOptions): UseSupportChatRe
     const query = conversationIdRef.current
       ? { conversationId: conversationIdRef.current }
       : undefined;
-    const res = await client.getConversation(query);
+    const res = await client.chat.conversation(query);
     if (res.error) {
       setError(res.error.message ?? "Failed to load conversation");
       setStatus("error");
@@ -114,7 +114,7 @@ export function useSupportChat(options: UseSupportChatOptions): UseSupportChatRe
       setSending(true);
       const input: SendMessageInput = { body: text };
       if (conversationIdRef.current) input.conversationId = conversationIdRef.current;
-      const res = await client.sendMessage(input);
+      const res = await client.chat.send(input);
       setSending(false);
       if (res.error) {
         setError(res.error.message ?? "Failed to send message");
@@ -157,7 +157,7 @@ export function useSupportChat(options: UseSupportChatOptions): UseSupportChatRe
 /* Reference widget                                                           */
 /* -------------------------------------------------------------------------- */
 
-export interface SupportWidgetProps {
+export interface SupportChatWidgetProps {
   client: SupportClient;
   title?: string;
   greeting?: string;
@@ -213,7 +213,7 @@ function isOutbound(authorType: SupportMessage["authorType"]): boolean {
   return authorType === "user" || authorType === "visitor";
 }
 
-export function SupportWidget(props: SupportWidgetProps): React.ReactElement {
+export function SupportChatWidget(props: SupportChatWidgetProps): React.ReactElement {
   const {
     client,
     title = "Support",
@@ -397,7 +397,8 @@ export function AgentInbox(props: AgentInboxProps): React.ReactElement {
 
   const loadThread = React.useCallback(
     async (conversationId: string) => {
-      const res = await client.getConversation({ conversationId });
+      if (!agent) return;
+      const res = await agent.conversation({ conversationId });
       if (res.error) {
         setError(res.error.message ?? "Failed to load conversation");
         return;
@@ -405,7 +406,7 @@ export function AgentInbox(props: AgentInboxProps): React.ReactElement {
       setError(null);
       if (res.data) setThread(res.data);
     },
-    [client],
+    [agent],
   );
 
   React.useEffect(() => {
@@ -697,7 +698,8 @@ export function useSupportInbox(options: UseSupportInboxOptions): UseSupportInbo
 
   const loadThread = React.useCallback(
     async (conversationId: string) => {
-      const res = await client.getConversation({ conversationId });
+      if (!agent) return;
+      const res = await agent.conversation({ conversationId });
       if (res.error) {
         setError(res.error.message ?? "Failed to load conversation");
         return;
@@ -705,7 +707,7 @@ export function useSupportInbox(options: UseSupportInboxOptions): UseSupportInbo
       setError(null);
       if (res.data) setThread(res.data);
     },
-    [client],
+    [agent],
   );
 
   const refresh = React.useCallback(async () => {
