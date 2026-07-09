@@ -3,11 +3,13 @@
  *
  * Identity comes from Better Auth itself: conversations link to `user.id`, and
  * the agent inbox joins back to the `user` table. Pre-auth visitors are tracked
- * with a signed cookie. An optional `aiResponder` answers first and escalates to
- * a human on `null`. Agent endpoints are role-gated (composes with the Better
+ * with a signed cookie. It is **human-first by default**: with no `aiResponder`,
+ * every inbound message opens/updates a conversation as `open` and waits for a
+ * human agent. An optional (opt-in) `aiResponder` can answer first and escalate
+ * to a human on `null`. Agent endpoints are role-gated (composes with the Better
  * Auth `admin` plugin).
  *
- * Realtime is poll-based in v0: clients poll `/support/chat/stream`.
+ * Realtime is poll-based: clients poll `/support/chat/stream`.
  * See the README for the serverless/SSE caveats.
  */
 import type { GenericEndpointContext, BetterAuthPlugin } from "@better-auth/core";
@@ -59,16 +61,18 @@ export interface SupportOptions {
    */
   agentRole?: string;
   /**
-   * AI first-responder. Called on an inbound message when the conversation is
-   * unassigned. Return a string to auto-reply (posted as an `ai` message and
-   * the conversation stays `open`); return `null` to escalate — the
-   * conversation is marked `pending` and `notify` fires for the agents.
+   * Optional AI first-responder — **off by default (human-first)**. When
+   * omitted, inbound messages simply keep the conversation `open` and wait for
+   * a human agent. When provided, it is called on an inbound message while the
+   * conversation is unassigned: return a string to auto-reply (posted as an
+   * `ai` message; the conversation stays `open`); return `null` to escalate —
+   * the conversation is marked `pending` and `notify` fires for the agents.
    */
   aiResponder?: (message: string, ctx: GenericEndpointContext) => Promise<string | null>;
   /** Notify agents out-of-band (email/Slack/Discord/webhook). */
   notify?: SupportNotifyHooks;
   /**
-   * Realtime transport. v0 only implements `"poll"` (serverless-safe); `"sse"`
+   * Realtime transport. Only `"poll"` is implemented (serverless-safe); `"sse"`
    * is accepted for forward-compat but currently behaves like `"poll"`.
    */
   realtime?: "sse" | "poll";
@@ -422,37 +426,38 @@ export const support = (opts: SupportOptions = {}) => {
             );
           }
 
-          // A new inbound message reopens a closed thread.
+          // A new inbound message reopens a closed thread. Otherwise the
+          // conversation stays `open` and waits for a human agent — this is the
+          // human-first default. When an `aiResponder` is configured (opt-in),
+          // it may answer first (stays `open`) or escalate to `pending` on
+          // `null`.
           let nextStatus: ConversationStatus =
             conversation.status === "closed" ? "open" : conversation.status;
 
-          if (!conversation.assignedAgentId) {
-            if (opts.aiResponder) {
-              let reply: string | null = null;
-              try {
-                reply = await opts.aiResponder(text, ctx);
-              } catch (error) {
-                ctx.context.logger.error("[support] aiResponder failed", error);
-              }
-              if (reply && reply.trim()) {
-                const aiMessage = await insertMessage(
-                  adapter,
-                  conversation.id,
-                  "ai",
-                  null,
-                  reply.trim(),
-                );
-                created.push(aiMessage);
-                nextStatus = "open";
-              } else {
-                // Escalate to a human.
-                nextStatus = "pending";
-              }
+          if (!conversation.assignedAgentId && opts.aiResponder) {
+            let reply: string | null = null;
+            try {
+              reply = await opts.aiResponder(text, ctx);
+            } catch (error) {
+              ctx.context.logger.error("[support] aiResponder failed", error);
+            }
+            if (reply && reply.trim()) {
+              const aiMessage = await insertMessage(
+                adapter,
+                conversation.id,
+                "ai",
+                null,
+                reply.trim(),
+              );
+              created.push(aiMessage);
+              nextStatus = "open";
             } else {
-              // No AI first-responder: route straight to the human queue.
+              // AI declined to answer — escalate to the human queue.
               nextStatus = "pending";
             }
           }
+          // No `aiResponder`: nothing to do — the conversation is already
+          // `open` and sitting in the human agent queue.
 
           conversation = await updateConversation(
             adapter,

@@ -2,20 +2,27 @@
 
 A self-hosted, embeddable **support chat + agent dashboard** that plugs directly into a
 [Better Auth](https://better-auth.com) app. Identity, users and agent roles come from Better Auth
-itself — no separate user system, no HMAC identity bridge. It composes with the Better Auth
-**admin plugin** for agent roles and exposes an **AI-first-responder hook** so an AI agent can answer
-first and escalate to a human, with the visitor's email/plan/usage already attached.
+itself — no separate user system, no HMAC identity bridge.
 
-- **Headless core** — a Better Auth server plugin + client plugin (endpoints + typed actions).
-- **Reference UI** — an unstyled floating `<SupportChatWidget/>` for visitors and a full two-pane
-  `<SupportDashboard/>` support console for agents, React-only.
-- **AI-first-responder** — bring your own `aiResponder`; reply to auto-answer, `null` to escalate.
+It is **human-first by default**: out of the box you get a real live-chat inbox — a visitor sends a
+message, it opens a conversation, and a human agent replies from the dashboard. No AI is involved
+unless you opt in. When you _do_ want automation, drop in an **`aiResponder`** to answer first and
+escalate to a human whenever it returns `null`.
+
+- **Polished reference UI** — an Intercom-style floating `<SupportChatWidget/>` for visitors and a
+  Chatwoot-style two-pane `<SupportDashboard/>` console for agents. Genuinely styled out of the box,
+  React-only (no CSS dependency), and fully theme-prop-driven.
+- **Headless core** — a Better Auth server plugin + client plugin (endpoints + typed actions) and
+  headless hooks (`useSupportChat`, `useSupportInbox`) if you'd rather build your own UI.
+- **Optional AI-first-responder** — bring your own `aiResponder`; reply to auto-answer, `null` to
+  escalate to a human. Off by default.
 - **Admin-plugin gating** — agent endpoints are role-gated (`agentRole`, default `"admin"`).
 
-> **Status: v0.** The core message / conversation / inbox / stats / reply / assign / close flow,
-> admin-role gating, anonymous visitors (signed cookie), and the `aiResponder` hook are fully
-> implemented. Realtime is **poll-based** in v0 (see [Caveats](#caveats)). File uploads, a help
-> center, canned replies, and typing indicators are out of scope.
+> **Status: v0.3.** Human-first live chat, admin-role gating, anonymous visitors (signed cookie),
+> the polished/themeable reference UI, and the optional `aiResponder` hook are fully implemented and
+> covered by an end-to-end flow test (`bun run test:human-flow`). Realtime is **poll-based** (see
+> [Caveats](#caveats)). File uploads, a help center, canned replies, and typing detection are out of
+> scope.
 
 MIT © Automatons, LLC.
 
@@ -39,7 +46,7 @@ Sub-path exports:
 ### 1. Server — add the plugin
 
 `support` composes with the `admin` plugin (which supplies the `role` field the agent guard
-checks). Add both, then regenerate your schema.
+checks). Add both, then regenerate your schema. **This is the human-first setup — no AI:**
 
 ```ts
 // src/lib/auth.ts
@@ -48,18 +55,15 @@ import { admin } from "better-auth/plugins";
 import { nextCookies } from "better-auth/next-js";
 import { support } from "better-auth-support/server";
 
-import { myAiResponder } from "@/lib/support/ai-responder";
-import { notifyAgents } from "@/lib/support/notify";
-
 export const auth = betterAuth({
   // ...database, emailAndPassword, other plugins...
   plugins: [
     admin(), // provides user.role — the agent guard reads it
     support({
-      agentRole: "admin",           // who can use the agent dashboard
-      aiResponder: myAiResponder,   // AI answers first; return null to escalate to a human
+      agentRole: "admin", // who can use the agent dashboard
+      // No aiResponder → every message opens a conversation and waits for a human.
+      // Optional: get pinged out-of-band when a visitor writes in.
       notify: { onNewConversation: notifyAgents },
-      anonymous: true,              // allow pre-auth visitors via a signed cookie (default)
     }),
     nextCookies(), // must be last
   ],
@@ -97,7 +101,13 @@ import { SupportChatWidget } from "better-auth-support/react";
 import { authClient } from "@/lib/auth-client";
 
 export function ChatBubble() {
-  return <SupportChatWidget client={authClient} title="Support" accentColor="#2563eb" />;
+  return (
+    <SupportChatWidget
+      client={authClient}
+      title="Acme Support"
+      subtitle="We typically reply in a few minutes"
+    />
+  );
 }
 ```
 
@@ -113,7 +123,29 @@ export default function InboxPage() {
 }
 ```
 
-## The AI-first-responder
+That's the whole loop: visitor sends → conversation opens → it shows in the dashboard inbox → an
+agent replies → the widget polls and renders the reply. No AI, no extra services.
+
+## How the human flow works
+
+1. A visitor (logged-in **or** anonymous via a signed cookie) sends a message from
+   `<SupportChatWidget/>`. A conversation is created (or reused) with status **`open`** and the
+   message is stored as `authorType: "visitor"` (or `"user"`).
+2. The conversation shows up in `<SupportDashboard/>` under **Open**, flagged **unread** with a
+   last-message preview. Your `notify` hooks (if configured) fire so agents get pinged.
+3. An agent opens the thread and replies. The reply is stored as `authorType: "agent"` and the
+   conversation is assigned to that agent.
+4. The visitor's widget is polling `/support/chat/stream` (via `chat.subscribe` /
+   `useSupportChat`) and renders the agent's reply within a few seconds — no refresh needed.
+5. The agent closes the conversation (`closed`). A later visitor message reopens it (`open`).
+
+Status transitions: `open` (new / awaiting a human) → assigned on reply → `closed`. The only way a
+conversation becomes `pending` is an **AI escalation** (see below); a pure human setup never uses
+it.
+
+## Optional: AI first-responder
+
+The `aiResponder` is **off by default**. Provide one only if you want an AI to answer first:
 
 `aiResponder(message, ctx) => Promise<string | null>` runs on every inbound message while the
 conversation is **unassigned**:
@@ -127,16 +159,54 @@ Once a human agent replies (or the conversation is assigned), the AI responder i
 human owns the thread.
 
 ```ts
-const myAiResponder = async (message: string) => {
-  const answer = await assistant.tryAnswer(message); // your AI
-  return answer ?? null; // null → escalate to the agent queue
-};
+support({
+  agentRole: "admin",
+  aiResponder: async (message) => {
+    const answer = await assistant.tryAnswer(message); // your AI
+    return answer ?? null; // null → escalate to the human queue
+  },
+});
 ```
+
+## SupportChatWidget
+
+An Intercom-style floating messenger: a launcher bubble that morphs to a close icon, a rounded panel
+with a branded header, agent/visitor message bubbles with avatars, timestamps and day dividers, a
+typing-indicator slot, and an auto-growing composer (Enter to send, Shift+Enter for a newline). It
+is React-only, injects a single shared stylesheet, and is fully themeable. On mobile the panel goes
+full-screen; animations respect `prefers-reduced-motion`.
+
+```tsx
+<SupportChatWidget
+  client={authClient}
+  title="Acme Support"
+  subtitle="We usually reply within an hour"
+  greeting="Hi there 👋 Ask us anything."
+  theme={{ accent: "#4f46e5", radius: 18 }}
+  poweredBy={<span>Powered by Acme</span>}
+/>
+```
+
+| Prop | Type | Default | Description |
+| --- | --- | --- | --- |
+| `client` | `SupportClient` | — | A client configured with `supportClient()`. |
+| `title` | `string` | `"Support"` | Header title (also the default agent avatar/initials). |
+| `subtitle` | `string` | `"We typically reply in a few minutes"` | Header subtitle. |
+| `greeting` | `string` | `"Hi there 👋 …"` | Shown as the first incoming bubble before any messages. |
+| `placeholder` | `string` | `"Type your message…"` | Composer placeholder. |
+| `pollIntervalMs` | `number` | `3000` | Poll cadence while the panel is open. |
+| `theme` | `SupportTheme` | strong defaults | Color/surface/radius overrides (see below). |
+| `accentColor` | `string` | — | **Deprecated** shortcut for `theme.accent`. |
+| `avatar` | `ReactNode` | initials badge | Optional avatar/team element in the header. |
+| `poweredBy` | `ReactNode` | — | Optional footer line. Omit to hide. |
+| `typing` | `boolean` | `false` | Show the incoming "…" typing indicator (drive it from your own state). |
+| `defaultOpen` | `boolean` | `false` | Start with the panel open. |
+| `className` / `style` | | — | Applied to the widget root (after theme variables). |
 
 ## Support dashboard
 
-`<SupportDashboard/>` is a full, self-hosted agent console (think of the Better Auth dashboard
-plugin, but for support). It is built on the `useSupportInbox()` hook and the agent client actions.
+`<SupportDashboard/>` is a full, self-hosted Chatwoot-style agent console. It is built on the
+`useSupportInbox()` hook and the agent client actions.
 
 ```tsx
 "use client";
@@ -150,14 +220,16 @@ export default function SupportConsole() {
 
 What it renders:
 
-- **Overview stat row** — open / pending / closed / total conversation counts (from `/support/agent/stats`).
-- **Conversation list** — status filter tabs (all / open / pending / closed), an unread indicator
-  (the latest message is inbound and awaiting a reply), the visitor's identity/email, a
-  last-message preview, and the assigned agent.
-- **Conversation thread** — the full message history, a reply composer, and **assign** (to yourself)
-  / **close** actions.
+- **Overview stat cards** — open / pending / closed / total counts (from `/support/agent/stats`).
+  The cards double as filter shortcuts.
+- **Conversation list** — status filter tabs (all / open / pending / closed), each row with an
+  avatar/initial, contact name/email, last-message preview, relative timestamp, an unread dot, and a
+  status pill.
+- **Thread pane** — contact identity header with **Assign to me** / **Close** actions, a scrollable
+  transcript (agent vs visitor bubbles with avatars, timestamps and day dividers), and a reply
+  composer pinned to the bottom. It collapses to a single pane with a back button on small screens.
 
-It is React-only, inline-styled, and restyle-able:
+It is React-only and restyle-able via the same `theme` prop as the widget:
 
 | Prop | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -165,9 +237,8 @@ It is React-only, inline-styled, and restyle-able:
 | `title` | `string` | `"Support"` | Header label. |
 | `initialStatus` | `"all" \| "open" \| "pending" \| "closed"` | `"open"` | Initial list filter. |
 | `pollIntervalMs` | `number` | `5000` | Refresh cadence for the list, stats, and open thread. |
-| `className` | `string` | — | Applied to the root element. |
-| `style` | `CSSProperties` | — | Merged onto the root element's inline styles. |
-| `theme` | `SupportDashboardTheme` | neutral | `{ accent, background, surface, border, text, mutedText }` color overrides. |
+| `theme` | `SupportTheme` | strong defaults | Color/surface/radius overrides (see below). |
+| `className` / `style` | | — | Applied to the root element (after theme variables). |
 
 Prefer to build your own console UI? Use the headless hook directly:
 
@@ -182,14 +253,41 @@ const {
 `<AgentInbox/>` remains available as a minimal two-pane alternative if you don't need the stats row
 and status filters.
 
+## Theming
+
+Both components share one `SupportTheme` shape. Only structural CSS is shared/injected once; every
+color and radius is driven by CSS custom properties set inline per instance, so overrides are pure
+props — no CSS import, no build step.
+
+| Field | Default | Used for |
+| --- | --- | --- |
+| `accent` | `#2563eb` | Launcher, outbound bubbles, primary buttons, active tabs. |
+| `accentContrast` | `#ffffff` | Text/icons on top of `accent`. |
+| `background` | `#ffffff` | Panel / console background. |
+| `surface` | `#ffffff` | Header, composer, list surfaces. |
+| `incoming` | `#f1f5f9` | Incoming bubbles + subtle hover. |
+| `border` | `#e5e7eb` | Dividers and outlines. |
+| `text` | `#0f172a` | Primary text. |
+| `mutedText` | `#64748b` | Secondary text, timestamps, labels. |
+| `radius` | `16` | Base corner radius (px) for panels/console. |
+
+```tsx
+const brand = { accent: "#111827", accentContrast: "#fff", incoming: "#f3f4f6", radius: 20 };
+<SupportChatWidget client={authClient} theme={brand} />
+<SupportDashboard client={authClient} theme={brand} />
+```
+
+> `SupportChatTheme` and `SupportDashboardTheme` remain exported as aliases of `SupportTheme` for
+> back-compat.
+
 ## Configuration (`SupportOptions`)
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `agentRole` | `string` | `"admin"` | Role permitted on the agent endpoints. Checked against `session.user.role` (comma-separated roles supported). Composes with the admin plugin. |
-| `aiResponder` | `(msg, ctx) => Promise<string \| null>` | — | AI first-responder. String → auto-reply; `null` → escalate. |
+| `aiResponder` | `(msg, ctx) => Promise<string \| null>` | — (**off**) | **Optional** AI first-responder. String → auto-reply (stays `open`); `null` → escalate (`pending`). Omit for a pure human-first inbox. |
 | `notify` | `{ onNewConversation?, onNewMessage? }` | — | Out-of-band agent notifications (email/Slack/Discord/webhook). Failures are logged, never fatal. |
-| `realtime` | `"poll" \| "sse"` | `"poll"` | v0 implements polling only; `"sse"` is accepted for forward-compat and currently behaves like `"poll"`. |
+| `realtime` | `"poll" \| "sse"` | `"poll"` | Polling only today; `"sse"` is accepted for forward-compat and currently behaves like `"poll"`. |
 | `anonymous` | `boolean` | `true` | Allow pre-auth visitors via a signed cookie (`support_visitor`). |
 
 ## Endpoints
@@ -255,21 +353,28 @@ Conversations link to `user.id` so the inbox can join to the user's email/plan/r
 
 ## Caveats
 
-- **Realtime is polling in v0.** Clients poll `/support/chat/stream` (and the dashboard
-  re-fetches `/support/agent/inbox` + `/support/agent/stats`) on an interval. This is deliberately
+- **Realtime is polling.** Clients poll `/support/chat/stream` (and the dashboard re-fetches
+  `/support/agent/inbox` + `/support/agent/stats`) on an interval. This is deliberately
   **serverless-safe** — long-lived SSE connections are awkward on Lambda/SST/Vercel. A pluggable
   SSE + pub-sub (Redis/Ably) transport is planned for self-hosters who can run persistent
   connections; `realtime: "sse"` is reserved for it and currently polls.
 - **Admin plugin is a prerequisite** for the default agent gating: it supplies the `user.role`
   field. If you use a different roles mechanism, set `agentRole` to match your role string.
-- **Anonymous → user merge** (linking a visitor's history to their account on sign-in) is planned
-  for v1; v0 keeps visitor and user conversations separate.
-- Out of scope for v0/v1: file uploads, a help center, and campaigns.
+- **Anonymous → user merge** (linking a visitor's history to their account on sign-in) is planned;
+  today visitor and user conversations stay separate.
+- Out of scope for now: file uploads, a help center, and campaigns.
 
 ## Development
 
 ```bash
 bun install
-bun run typecheck   # tsc --noEmit
-bun run build       # tsup -> dist/ (esm + d.ts for all three entries)
+bun run typecheck        # tsc --noEmit
+bun run build            # tsup -> dist/ (esm + d.ts for all three entries)
+bun run test:human-flow  # end-to-end human reply-flow smoke test (in-memory Better Auth)
 ```
+
+`bun run test:human-flow` boots a real Better Auth instance (in-memory adapter + `admin` + `support`
+with **no** `aiResponder`) and asserts the full loop: visitor sends → conversation opens → agent
+inbox shows it unread → agent replies → the visitor's poll returns the reply → close transitions to
+`closed`. It also checks the opt-in `aiResponder` (auto-answer stays `open`; `null` escalates to
+`pending`).

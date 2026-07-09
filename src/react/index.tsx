@@ -1,16 +1,21 @@
 /**
- * `better-auth-support/react` — headless hooks + reference UI.
+ * `better-auth-support/react` — headless hooks + polished reference UI.
  *
  * Visitor side: `useSupportChat()` is the headless core (state + poll-based
- * realtime) and `<SupportChatWidget/>` is the floating bubble.
+ * realtime) and `<SupportChatWidget/>` is an Intercom-style floating messenger.
  *
  * Agent side: `useSupportInbox()` is the headless console core and
- * `<SupportDashboard/>` is a full two-pane support console (list + thread +
- * stats + assign/close). `<AgentInbox/>` remains as a minimal alternative.
+ * `<SupportDashboard/>` is a Chatwoot-style two-pane support console (list +
+ * thread + stats + assign/close). `<AgentInbox/>` remains as a minimal
+ * alternative.
  *
- * Every component is intentionally lightly/inline-styled so consumers can
- * restyle via `className`/`theme` props or replace them outright. React is the
- * only runtime dependency.
+ * The reference components are genuinely styled out of the box — a single
+ * runtime stylesheet is injected once and every color/surface/radius is driven
+ * by CSS custom properties, so consumers restyle purely through the `theme`
+ * prop (no CSS dependency, no build step, React is the only runtime dep). The
+ * static rules (layout, hover, focus rings, animations, responsive/mobile
+ * behaviour, `prefers-reduced-motion`) live in that stylesheet; per-instance
+ * theme values are set inline as `--bas-*` variables on each root.
  *
  * All components take a `client` prop — pass your Better Auth client configured
  * with `supportClient()`; it structurally satisfies `SupportClient`.
@@ -41,7 +46,723 @@ export type {
 const DEFAULT_POLL_MS = 3000;
 
 /* -------------------------------------------------------------------------- */
-/* Headless hook                                                              */
+/* Runtime stylesheet (injected once)                                         */
+/* -------------------------------------------------------------------------- */
+
+const STYLE_ID = "better-auth-support-styles";
+
+/**
+ * All structural styling for the reference components. Colors/radii are read
+ * from `--bas-*` custom properties set inline per instance, so a single shared
+ * stylesheet themes every widget/dashboard on the page.
+ */
+const STYLESHEET = `
+.bas-root, .bas-root * { box-sizing: border-box; }
+.bas-root {
+  --bas-accent: #2563eb;
+  --bas-accent-contrast: #ffffff;
+  --bas-bg: #ffffff;
+  --bas-surface: #ffffff;
+  --bas-incoming: #f1f5f9;
+  --bas-border: #e5e7eb;
+  --bas-text: #0f172a;
+  --bas-muted: #64748b;
+  --bas-radius: 16px;
+  --bas-shadow: 0 24px 48px -12px rgba(15, 23, 42, 0.28), 0 8px 20px -8px rgba(15, 23, 42, 0.16);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--bas-text);
+  line-height: 1.45;
+}
+.bas-root button { font-family: inherit; }
+.bas-root :focus-visible { outline: 2px solid var(--bas-accent); outline-offset: 2px; border-radius: 6px; }
+
+/* ---- Avatars ---- */
+.bas-avatar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  font-size: 11px; font-weight: 700;
+  letter-spacing: 0.2px;
+  user-select: none;
+  color: var(--bas-accent-contrast);
+  background: var(--bas-accent);
+}
+.bas-avatar[data-kind="visitor"] { background: #334155; color: #fff; }
+.bas-avatar[data-kind="system"] { background: var(--bas-incoming); color: var(--bas-muted); }
+.bas-avatar-spacer { flex: 0 0 auto; width: 28px; height: 1px; }
+
+/* ---- Message transcript (shared by widget + dashboard) ---- */
+.bas-day {
+  display: flex; align-items: center; justify-content: center;
+  margin: 14px 0 10px; gap: 8px;
+}
+.bas-day::before, .bas-day::after {
+  content: ""; height: 1px; flex: 1; background: var(--bas-border);
+}
+.bas-day span {
+  font-size: 11px; font-weight: 600; color: var(--bas-muted);
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
+.bas-msg {
+  display: flex; align-items: flex-end; gap: 8px;
+  margin: 3px 0;
+  animation: bas-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.bas-msg[data-out] { flex-direction: row-reverse; }
+.bas-msg-col { display: flex; flex-direction: column; max-width: 78%; min-width: 0; }
+.bas-msg[data-out] .bas-msg-col { align-items: flex-end; }
+.bas-bubble {
+  padding: 9px 13px;
+  border-radius: 16px;
+  background: var(--bas-incoming);
+  color: var(--bas-text);
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+}
+.bas-msg:not([data-out]) .bas-bubble { border-bottom-left-radius: 5px; }
+.bas-msg[data-out] .bas-bubble {
+  background: var(--bas-accent);
+  color: var(--bas-accent-contrast);
+  border-bottom-right-radius: 5px;
+}
+.bas-msg-meta {
+  display: flex; align-items: center; gap: 5px;
+  margin: 3px 2px 0;
+  font-size: 11px; color: var(--bas-muted);
+}
+.bas-msg-author { font-weight: 600; }
+.bas-msg-meta time { opacity: 0.85; }
+
+/* ---- Typing indicator ---- */
+.bas-typing { display: inline-flex; gap: 4px; align-items: center; padding: 12px 14px; }
+.bas-typing span {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; opacity: 0.4;
+  animation: bas-blink 1.3s infinite ease-in-out;
+}
+.bas-typing span:nth-child(2) { animation-delay: 0.18s; }
+.bas-typing span:nth-child(3) { animation-delay: 0.36s; }
+
+/* ---- Composer (shared) ---- */
+.bas-composer {
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 10px 12px;
+  background: var(--bas-surface);
+  border-top: 1px solid var(--bas-border);
+}
+.bas-composer textarea {
+  flex: 1; min-width: 0;
+  resize: none;
+  max-height: 120px;
+  padding: 10px 12px;
+  border: 1px solid var(--bas-border);
+  border-radius: 12px;
+  font-family: inherit; font-size: 14px; line-height: 1.4;
+  color: var(--bas-text); background: var(--bas-bg);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.bas-composer textarea::placeholder { color: var(--bas-muted); }
+.bas-composer textarea:focus {
+  outline: none;
+  border-color: var(--bas-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bas-accent) 18%, transparent);
+}
+.bas-send {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px;
+  border: none; border-radius: 12px;
+  background: var(--bas-accent); color: var(--bas-accent-contrast);
+  cursor: pointer;
+  transition: transform 0.12s ease, opacity 0.15s, background 0.15s;
+}
+.bas-send:hover:not(:disabled) { background: color-mix(in srgb, var(--bas-accent) 88%, #000); }
+.bas-send:active:not(:disabled) { transform: scale(0.94); }
+.bas-send:disabled { opacity: 0.45; cursor: default; }
+.bas-send svg { width: 18px; height: 18px; }
+
+/* ---- Widget: launcher ---- */
+.bas-widget {
+  position: fixed; right: 20px; bottom: 20px;
+  z-index: 2147483000;
+}
+.bas-launcher {
+  position: absolute; right: 0; bottom: 0;
+  width: 56px; height: 56px;
+  border: none; border-radius: 50%;
+  background: var(--bas-accent); color: var(--bas-accent-contrast);
+  cursor: pointer;
+  box-shadow: 0 12px 24px -6px color-mix(in srgb, var(--bas-accent) 55%, transparent), 0 6px 12px -4px rgba(15,23,42,0.25);
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.18s;
+}
+.bas-launcher:hover { transform: scale(1.06); }
+.bas-launcher:active { transform: scale(0.95); }
+.bas-launcher svg {
+  position: absolute; width: 26px; height: 26px;
+  transition: opacity 0.2s ease, transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.bas-launcher .bas-ic-close { opacity: 0; transform: rotate(-90deg) scale(0.6); }
+.bas-launcher .bas-ic-chat { opacity: 1; transform: rotate(0) scale(1); }
+.bas-widget[data-open] .bas-launcher .bas-ic-close { opacity: 1; transform: rotate(0) scale(1); }
+.bas-widget[data-open] .bas-launcher .bas-ic-chat { opacity: 0; transform: rotate(90deg) scale(0.6); }
+
+/* ---- Widget: panel ---- */
+.bas-panel {
+  position: absolute; right: 0; bottom: 72px;
+  width: 380px; max-width: calc(100vw - 32px);
+  height: min(640px, calc(100vh - 120px));
+  display: flex; flex-direction: column;
+  background: var(--bas-bg);
+  border: 1px solid var(--bas-border);
+  border-radius: var(--bas-radius);
+  box-shadow: var(--bas-shadow);
+  overflow: hidden;
+  transform-origin: bottom right;
+  opacity: 0; transform: translateY(12px) scale(0.98);
+  transition: opacity 0.2s ease, transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.bas-panel[data-open] { opacity: 1; transform: translateY(0) scale(1); }
+.bas-panel-header {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 12px;
+  padding: 16px 16px 18px;
+  color: var(--bas-accent-contrast);
+  background: var(--bas-accent);
+  background-image: linear-gradient(135deg, color-mix(in srgb, var(--bas-accent) 92%, #fff), color-mix(in srgb, var(--bas-accent) 78%, #000));
+}
+.bas-panel-header .bas-avatar {
+  width: 40px; height: 40px; font-size: 15px;
+  background: rgba(255,255,255,0.22); color: #fff;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.25) inset;
+}
+.bas-head-text { flex: 1; min-width: 0; }
+.bas-head-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+.bas-head-sub {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12.5px; opacity: 0.9; margin-top: 2px;
+}
+.bas-status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #4ade80; box-shadow: 0 0 0 3px rgba(74,222,128,0.25);
+  flex: 0 0 auto;
+}
+.bas-head-close {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px;
+  border: none; border-radius: 8px;
+  background: rgba(255,255,255,0.14); color: inherit;
+  cursor: pointer; transition: background 0.15s;
+}
+.bas-head-close:hover { background: rgba(255,255,255,0.26); }
+.bas-messages {
+  flex: 1 1 auto; overflow-y: auto;
+  padding: 14px 14px 6px;
+  background: var(--bas-bg);
+  scrollbar-width: thin;
+}
+.bas-messages::-webkit-scrollbar { width: 8px; }
+.bas-messages::-webkit-scrollbar-thumb { background: var(--bas-border); border-radius: 8px; }
+.bas-greeting {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 4px 2px 10px;
+}
+.bas-greeting .bas-avatar { width: 34px; height: 34px; }
+.bas-greeting-body {
+  background: var(--bas-incoming); color: var(--bas-text);
+  padding: 12px 14px; border-radius: 16px; border-bottom-left-radius: 5px;
+  font-size: 14px; box-shadow: 0 1px 1px rgba(15,23,42,0.04);
+}
+.bas-error {
+  padding: 8px 14px; margin: 0;
+  color: #b91c1c; font-size: 12.5px;
+  background: color-mix(in srgb, #b91c1c 8%, var(--bas-bg));
+}
+.bas-poweredby {
+  padding: 8px 12px; text-align: center;
+  font-size: 11px; color: var(--bas-muted);
+  background: var(--bas-surface);
+  border-top: 1px solid var(--bas-border);
+}
+.bas-poweredby a { color: inherit; font-weight: 600; text-decoration: none; }
+
+/* ---- Dashboard ---- */
+.bas-dash {
+  display: flex; flex-direction: column;
+  height: 100%; min-height: 520px;
+  background: var(--bas-bg);
+  border: 1px solid var(--bas-border);
+  border-radius: var(--bas-radius);
+  overflow: hidden;
+  font-size: 14px;
+}
+.bas-dash-top {
+  display: flex; align-items: center; gap: 16px;
+  padding: 14px 18px;
+  background: var(--bas-surface);
+  border-bottom: 1px solid var(--bas-border);
+}
+.bas-dash-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; margin-right: 4px; }
+.bas-stats { display: flex; gap: 8px; flex-wrap: wrap; }
+.bas-stat {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 6px 14px;
+  border: 1px solid var(--bas-border); border-radius: 10px;
+  background: var(--bas-bg);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  min-width: 66px;
+}
+.bas-stat:hover { border-color: color-mix(in srgb, var(--bas-accent) 45%, var(--bas-border)); }
+.bas-stat[data-active] { border-color: var(--bas-accent); background: color-mix(in srgb, var(--bas-accent) 8%, var(--bas-bg)); }
+.bas-stat-num { font-size: 19px; font-weight: 700; line-height: 1.1; }
+.bas-stat-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--bas-muted); }
+.bas-dash-body { display: flex; flex: 1; min-height: 0; }
+
+.bas-list {
+  width: 320px; flex: 0 0 320px;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--bas-border);
+  background: var(--bas-surface);
+  min-height: 0;
+}
+.bas-tabs { display: flex; gap: 4px; padding: 10px; border-bottom: 1px solid var(--bas-border); }
+.bas-tab {
+  flex: 1; padding: 6px 8px;
+  font-size: 12.5px; text-transform: capitalize; font-weight: 500;
+  border: none; border-radius: 8px; cursor: pointer;
+  background: transparent; color: var(--bas-muted);
+  transition: background 0.15s, color 0.15s;
+}
+.bas-tab:hover { background: var(--bas-incoming); }
+.bas-tab[data-active] { background: var(--bas-accent); color: var(--bas-accent-contrast); font-weight: 600; }
+.bas-list-count { padding: 8px 14px; font-size: 11px; color: var(--bas-muted); border-bottom: 1px solid var(--bas-border); }
+.bas-list-scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-width: thin; }
+.bas-list-scroll::-webkit-scrollbar { width: 8px; }
+.bas-list-scroll::-webkit-scrollbar-thumb { background: var(--bas-border); border-radius: 8px; }
+.bas-empty { padding: 28px 18px; color: var(--bas-muted); text-align: center; font-size: 13px; }
+
+.bas-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  width: 100%; text-align: left;
+  padding: 12px 14px;
+  border: none; border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--bas-border);
+  background: transparent; cursor: pointer;
+  transition: background 0.12s;
+}
+.bas-row:hover { background: var(--bas-incoming); }
+.bas-row[data-selected] {
+  background: color-mix(in srgb, var(--bas-accent) 9%, var(--bas-bg));
+  border-left-color: var(--bas-accent);
+}
+.bas-row-main { flex: 1; min-width: 0; }
+.bas-row-top { display: flex; align-items: baseline; gap: 8px; }
+.bas-row-name { font-weight: 600; color: var(--bas-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.bas-row[data-unread] .bas-row-name { font-weight: 700; }
+.bas-row-time { font-size: 11px; color: var(--bas-muted); flex: 0 0 auto; }
+.bas-row-preview {
+  font-size: 12.5px; color: var(--bas-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-top: 2px;
+}
+.bas-row[data-unread] .bas-row-preview { color: var(--bas-text); }
+.bas-row-meta { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.bas-unread-dot {
+  flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--bas-accent); margin-top: 4px;
+}
+.bas-pill {
+  font-size: 10.5px; font-weight: 600; text-transform: capitalize;
+  padding: 2px 8px; border-radius: 999px;
+  color: #fff; background: var(--bas-muted);
+}
+.bas-pill[data-status="open"] { background: var(--bas-accent); }
+.bas-pill[data-status="pending"] { background: #d97706; }
+.bas-pill[data-status="closed"] { background: #64748b; }
+.bas-pill-agent { font-size: 11px; color: var(--bas-muted); }
+
+.bas-thread { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.bas-thread-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px;
+  background: var(--bas-surface);
+  border-bottom: 1px solid var(--bas-border);
+}
+.bas-thread-id { flex: 1; min-width: 0; }
+.bas-thread-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bas-thread-sub { font-size: 12px; color: var(--bas-muted); margin-top: 1px; }
+.bas-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.bas-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--bas-border); border-radius: 9px;
+  background: var(--bas-bg); color: var(--bas-text);
+  font-size: 13px; font-weight: 500; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.bas-btn:hover:not(:disabled) { background: var(--bas-incoming); border-color: color-mix(in srgb, var(--bas-accent) 40%, var(--bas-border)); }
+.bas-btn:disabled { opacity: 0.5; cursor: default; }
+.bas-btn-primary { background: var(--bas-accent); color: var(--bas-accent-contrast); border-color: transparent; }
+.bas-btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--bas-accent) 88%, #000); border-color: transparent; }
+.bas-transcript {
+  flex: 1; overflow-y: auto; min-height: 0;
+  padding: 16px; background: var(--bas-bg);
+  scrollbar-width: thin;
+}
+.bas-transcript::-webkit-scrollbar { width: 8px; }
+.bas-transcript::-webkit-scrollbar-thumb { background: var(--bas-border); border-radius: 8px; }
+.bas-back { display: none; }
+
+/* ---- Animations ---- */
+@keyframes bas-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes bas-blink {
+  0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 480px) {
+  .bas-widget { right: 16px; bottom: 16px; }
+  .bas-panel {
+    position: fixed; inset: 0;
+    width: 100%; max-width: 100%; height: 100%;
+    border-radius: 0; border: none;
+  }
+  .bas-widget[data-open] .bas-launcher { display: none; }
+}
+@media (max-width: 640px) {
+  .bas-list { flex-basis: 100%; width: 100%; }
+  .bas-dash[data-selected] .bas-list { display: none; }
+  .bas-dash:not([data-selected]) .bas-thread { display: none; }
+  .bas-back { display: inline-flex; }
+}
+
+/* ---- Reduced motion ---- */
+@media (prefers-reduced-motion: reduce) {
+  .bas-msg, .bas-launcher, .bas-launcher svg, .bas-panel, .bas-send, .bas-typing span { animation: none !important; transition: none !important; }
+}
+`;
+
+let stylesInjected = false;
+
+function ensureStyles(): void {
+  if (stylesInjected || typeof document === "undefined") return;
+  if (document.getElementById(STYLE_ID)) {
+    stylesInjected = true;
+    return;
+  }
+  const el = document.createElement("style");
+  el.id = STYLE_ID;
+  el.textContent = STYLESHEET;
+  document.head.appendChild(el);
+  stylesInjected = true;
+}
+
+// `useInsertionEffect` is React's dedicated hook for injecting styles before
+// paint; fall back to `useEffect` on older runtimes.
+const useStyleEffect = React.useInsertionEffect ?? React.useEffect;
+
+function useSupportStyles(): void {
+  useStyleEffect(() => {
+    ensureStyles();
+  }, []);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Theme                                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** Color/surface overrides shared by the reference components. */
+export interface SupportTheme {
+  /** Brand color: launcher, outbound bubbles, primary buttons. */
+  accent?: string;
+  /** Text/icon color on top of `accent`. Default `#ffffff`. */
+  accentContrast?: string;
+  /** Panel/console background. */
+  background?: string;
+  /** Header/composer/list surface (slightly distinct from `background`). */
+  surface?: string;
+  /** Incoming bubble + subtle hover surface. */
+  incoming?: string;
+  border?: string;
+  text?: string;
+  mutedText?: string;
+  /** Base corner radius in px for panels/console. Default `16`. */
+  radius?: number;
+}
+
+const DEFAULT_THEME: Required<SupportTheme> = {
+  accent: "#2563eb",
+  accentContrast: "#ffffff",
+  background: "#ffffff",
+  surface: "#ffffff",
+  incoming: "#f1f5f9",
+  border: "#e5e7eb",
+  text: "#0f172a",
+  mutedText: "#64748b",
+  radius: 16,
+};
+
+function themeVars(theme: Required<SupportTheme>): React.CSSProperties {
+  return {
+    "--bas-accent": theme.accent,
+    "--bas-accent-contrast": theme.accentContrast,
+    "--bas-bg": theme.background,
+    "--bas-surface": theme.surface,
+    "--bas-incoming": theme.incoming,
+    "--bas-border": theme.border,
+    "--bas-text": theme.text,
+    "--bas-muted": theme.mutedText,
+    "--bas-radius": `${theme.radius}px`,
+  } as unknown as React.CSSProperties;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Formatting helpers                                                         */
+/* -------------------------------------------------------------------------- */
+
+function toDate(value: string | Date): Date {
+  return value instanceof Date ? value : new Date(value);
+}
+
+function sameDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+function dayKey(d: Date): string {
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function clock(d: Date): string {
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function dayLabel(d: Date): string {
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (sameDay(d, today)) return "Today";
+  if (sameDay(d, yesterday)) return "Yesterday";
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(d.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }),
+  });
+}
+
+function relativeTime(value: string | Date): string {
+  const d = toDate(value);
+  const diffMs = Date.now() - d.getTime();
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return "now";
+  if (min < 60) return `${min}m`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24) return `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function initialOf(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "?";
+  const parts = trimmed.split(/\s+/);
+  if (parts.length >= 2 && parts[0] && parts[1]) {
+    return (parts[0][0]! + parts[1][0]!).toUpperCase();
+  }
+  return trimmed[0]!.toUpperCase();
+}
+
+type AvatarKind = "agent" | "visitor" | "system";
+
+function avatarKind(authorType: SupportMessage["authorType"]): AvatarKind {
+  if (authorType === "agent" || authorType === "ai") return "agent";
+  if (authorType === "system") return "system";
+  return "visitor";
+}
+
+/* -------------------------------------------------------------------------- */
+/* Shared subcomponents                                                       */
+/* -------------------------------------------------------------------------- */
+
+function Avatar(props: { label: string; kind: AvatarKind; className?: string }): React.ReactElement {
+  return (
+    <span className={`bas-avatar${props.className ? ` ${props.className}` : ""}`} data-kind={props.kind} aria-hidden="true">
+      {initialOf(props.label)}
+    </span>
+  );
+}
+
+const SendIcon = (): React.ReactElement => (
+  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M3.4 20.5 21 12 3.4 3.5c-.8-.4-1.6.4-1.3 1.2L4.5 11l7 1-7 1-2.4 6.3c-.3.8.5 1.6 1.3 1.2Z" />
+  </svg>
+);
+
+interface ComposerProps {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  placeholder: string;
+  sending: boolean;
+  disabled?: boolean;
+  textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
+  ariaLabel: string;
+}
+
+/** Auto-growing textarea + send button. Enter sends, Shift+Enter inserts a newline. */
+function Composer(props: ComposerProps): React.ReactElement {
+  const { value, onChange, onSubmit, placeholder, sending, disabled, textareaRef, ariaLabel } = props;
+  const innerRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const ref = textareaRef ?? innerRef;
+  const canSend = value.trim().length > 0 && !sending && !disabled;
+
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [value, ref]);
+
+  const submit = (event: React.FormEvent): void => {
+    event.preventDefault();
+    if (!canSend) return;
+    onSubmit();
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (canSend) onSubmit();
+    }
+  };
+
+  return (
+    <form className="bas-composer" onSubmit={submit}>
+      <textarea
+        ref={ref}
+        rows={1}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+        disabled={disabled}
+      />
+      <button type="submit" className="bas-send" disabled={!canSend} aria-label="Send message">
+        {sending ? (
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" strokeOpacity="0.3" />
+            <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite" />
+            </path>
+          </svg>
+        ) : (
+          <SendIcon />
+        )}
+      </button>
+    </form>
+  );
+}
+
+interface TranscriptProps {
+  messages: SupportMessage[];
+  outbound: (message: SupportMessage) => boolean;
+  labelFor: (message: SupportMessage) => string;
+  variant: "widget" | "dash";
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  intro?: React.ReactNode;
+  emptyState?: React.ReactNode;
+  typing?: boolean;
+}
+
+/** Message list with day dividers, grouped author labels, avatars and timestamps. */
+function Transcript(props: TranscriptProps): React.ReactElement {
+  const { messages, outbound, labelFor, variant, scrollRef, intro, emptyState, typing } = props;
+
+  const rows: React.ReactNode[] = [];
+  let lastDay = "";
+  let lastAuthor: SupportMessage["authorType"] | null = null;
+
+  for (const message of messages) {
+    const d = toDate(message.createdAt);
+    const key = dayKey(d);
+    const dayChanged = key !== lastDay;
+    if (dayChanged) {
+      lastDay = key;
+      lastAuthor = null;
+      rows.push(
+        <div className="bas-day" key={`day-${key}-${message.id}`}>
+          <span>{dayLabel(d)}</span>
+        </div>,
+      );
+    }
+    const out = outbound(message);
+    const label = labelFor(message);
+    const startsGroup = message.authorType !== lastAuthor;
+    lastAuthor = message.authorType;
+
+    rows.push(
+      <div className="bas-msg" data-out={out || undefined} key={message.id}>
+        {!out ? (
+          startsGroup ? (
+            <Avatar label={label} kind={avatarKind(message.authorType)} />
+          ) : (
+            <span className="bas-avatar-spacer" aria-hidden="true" />
+          )
+        ) : null}
+        <div className="bas-msg-col">
+          <div className="bas-bubble">{message.body}</div>
+          {startsGroup ? (
+            <div className="bas-msg-meta">
+              <span className="bas-msg-author">{label}</span>
+              <span aria-hidden="true">·</span>
+              <time dateTime={d.toISOString()}>{clock(d)}</time>
+            </div>
+          ) : null}
+        </div>
+      </div>,
+    );
+  }
+
+  return (
+    <div className={variant === "widget" ? "bas-messages" : "bas-transcript"} ref={scrollRef} aria-live="polite">
+      {intro}
+      {messages.length === 0 ? emptyState : rows}
+      {typing ? (
+        <div className="bas-msg" key="__typing">
+          <span className="bas-avatar" data-kind="agent" aria-hidden="true">
+            {"…"}
+          </span>
+          <div className="bas-msg-col">
+            <div className="bas-bubble bas-typing" role="status" aria-label="typing">
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Visitor headless hook                                                      */
 /* -------------------------------------------------------------------------- */
 
 export type SupportChatStatus = "idle" | "loading" | "ready" | "error";
@@ -57,6 +778,8 @@ export interface UseSupportChatOptions {
    * fully custom UIs that don't use the widget's open/close state.
    */
   autoStart?: boolean;
+  /** Initial open state for the widget. Default `false`. */
+  defaultOpen?: boolean;
 }
 
 export interface UseSupportChatResult {
@@ -74,7 +797,7 @@ export interface UseSupportChatResult {
 export function useSupportChat(options: UseSupportChatOptions): UseSupportChatResult {
   const { client, pollIntervalMs = DEFAULT_POLL_MS, autoStart = false } = options;
 
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(options.defaultOpen ?? false);
   const [conversation, setConversation] = React.useState<SupportConversation | null>(null);
   const [messages, setMessages] = React.useState<SupportMessage[]>([]);
   const [status, setStatus] = React.useState<SupportChatStatus>("idle");
@@ -154,218 +877,223 @@ export function useSupportChat(options: UseSupportChatOptions): UseSupportChatRe
 }
 
 /* -------------------------------------------------------------------------- */
-/* Reference widget                                                           */
+/* SupportChatWidget — Intercom-style messenger                               */
 /* -------------------------------------------------------------------------- */
+
+/** @deprecated alias kept for back-compat; use {@link SupportTheme}. */
+export type SupportChatTheme = SupportTheme;
 
 export interface SupportChatWidgetProps {
   client: SupportClient;
   title?: string;
+  /** Header subtitle. Default: "We typically reply in a few minutes". */
+  subtitle?: string;
+  /** Greeting shown as the first incoming bubble before any messages exist. */
   greeting?: string;
   placeholder?: string;
   pollIntervalMs?: number;
-  /** Accent color for the bubble and outbound messages. */
+  /** @deprecated use `theme.accent`. Shortcut for the brand color. */
   accentColor?: string;
+  /** Color/surface/radius overrides; merged over strong defaults. */
+  theme?: SupportTheme;
+  /** Optional avatar/team element rendered in the header. */
+  avatar?: React.ReactNode;
+  /** Footer line (e.g. "Powered by …"). Omit to hide. */
+  poweredBy?: React.ReactNode;
+  /** Show the incoming typing indicator (drive from your own AI/agent state). */
+  typing?: boolean;
+  /** Start with the panel open. */
+  defaultOpen?: boolean;
+  /** Applied to the widget root element. */
+  className?: string;
+  /** Merged onto the widget root's inline styles (after theme variables). */
+  style?: React.CSSProperties;
 }
 
-const bubbleStyle = (accent: string): React.CSSProperties => ({
-  position: "fixed",
-  right: 20,
-  bottom: 20,
-  width: 56,
-  height: 56,
-  borderRadius: "50%",
-  border: "none",
-  background: accent,
-  color: "#fff",
-  fontSize: 24,
-  cursor: "pointer",
-  boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
-  zIndex: 2147483000,
-});
+const CHAT_ICON = (
+  <svg className="bas-ic-chat" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12 3C6.5 3 2 6.6 2 11c0 2.1 1 4 2.8 5.4-.1 1.3-.6 2.6-1.6 3.8 1.7-.2 3.3-.8 4.6-1.8 1.3.4 2.7.6 4.2.6 5.5 0 10-3.6 10-8s-4.5-8-10-8Z" />
+  </svg>
+);
 
-const panelStyle: React.CSSProperties = {
-  position: "fixed",
-  right: 20,
-  bottom: 88,
-  width: 340,
-  maxHeight: 480,
-  display: "flex",
-  flexDirection: "column",
-  background: "#fff",
-  color: "#111",
-  border: "1px solid #e5e7eb",
-  borderRadius: 12,
-  boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
-  overflow: "hidden",
-  zIndex: 2147483000,
-  fontFamily: "system-ui, sans-serif",
-  fontSize: 14,
-};
+const CLOSE_ICON = (
+  <svg className="bas-ic-close" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+  </svg>
+);
 
-function authorLabel(authorType: SupportMessage["authorType"]): string {
-  if (authorType === "agent") return "Support";
+function widgetLabel(authorType: SupportMessage["authorType"], agentName: string): string {
+  if (authorType === "agent") return agentName;
   if (authorType === "ai") return "Assistant";
   if (authorType === "system") return "System";
   return "You";
 }
 
-function isOutbound(authorType: SupportMessage["authorType"]): boolean {
+function widgetOutbound(authorType: SupportMessage["authorType"]): boolean {
   return authorType === "user" || authorType === "visitor";
 }
 
+/** Small unmount-after-transition helper so open AND close both animate. */
+function useMountTransition(active: boolean, durationMs: number): { mounted: boolean; visible: boolean } {
+  const [mounted, setMounted] = React.useState(active);
+  const [visible, setVisible] = React.useState(active);
+
+  React.useEffect(() => {
+    if (active) {
+      setMounted(true);
+      const frame = requestAnimationFrame(() => setVisible(true));
+      return () => cancelAnimationFrame(frame);
+    }
+    setVisible(false);
+    const timer = setTimeout(() => setMounted(false), durationMs);
+    return () => clearTimeout(timer);
+  }, [active, durationMs]);
+
+  return { mounted, visible };
+}
+
 export function SupportChatWidget(props: SupportChatWidgetProps): React.ReactElement {
+  useSupportStyles();
   const {
     client,
     title = "Support",
-    greeting = "Hi! How can we help?",
-    placeholder = "Type a message…",
+    subtitle = "We typically reply in a few minutes",
+    greeting = "Hi there 👋 How can we help?",
+    placeholder = "Type your message…",
     pollIntervalMs,
-    accentColor = "#2563eb",
+    accentColor,
+    avatar,
+    poweredBy,
+    typing,
+    defaultOpen,
+    className,
+    style,
   } = props;
 
-  const chat = useSupportChat({ client, ...(pollIntervalMs ? { pollIntervalMs } : {}) });
+  const theme: Required<SupportTheme> = {
+    ...DEFAULT_THEME,
+    ...(accentColor ? { accent: accentColor } : {}),
+    ...props.theme,
+  };
+
+  const chat = useSupportChat({
+    client,
+    ...(pollIntervalMs ? { pollIntervalMs } : {}),
+    ...(defaultOpen ? { defaultOpen } : {}),
+  });
   const [draft, setDraft] = React.useState("");
   const listRef = React.useRef<HTMLDivElement | null>(null);
+  const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const { mounted, visible } = useMountTransition(chat.open, 240);
 
   React.useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [chat.messages]);
+  }, [chat.messages, typing, mounted]);
 
-  const submit = React.useCallback(
-    async (event: React.FormEvent) => {
-      event.preventDefault();
-      const text = draft.trim();
-      if (!text || chat.sending) return;
-      setDraft("");
-      await chat.sendMessage(text);
-    },
-    [draft, chat],
+  React.useEffect(() => {
+    if (visible) composerRef.current?.focus();
+  }, [visible]);
+
+  const submit = React.useCallback(async () => {
+    const text = draft.trim();
+    if (!text || chat.sending) return;
+    setDraft("");
+    await chat.sendMessage(text);
+  }, [draft, chat]);
+
+  const rootStyle: React.CSSProperties = { ...themeVars(theme), ...style };
+
+  const greetingBlock = (
+    <div className="bas-greeting">
+      <Avatar label={title} kind="agent" />
+      <div className="bas-greeting-body">{greeting}</div>
+    </div>
   );
 
-  if (!chat.open) {
-    return (
-      <button
-        type="button"
-        aria-label="Open support chat"
-        style={bubbleStyle(accentColor)}
-        onClick={() => chat.setOpen(true)}
-      >
-        {"\u{1F4AC}"}
-      </button>
-    );
-  }
-
   return (
-    <div style={panelStyle} role="dialog" aria-label={title}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "12px 14px",
-          background: accentColor,
-          color: "#fff",
-        }}
-      >
-        <strong>{title}</strong>
-        <button
-          type="button"
-          aria-label="Close support chat"
-          onClick={() => chat.setOpen(false)}
-          style={{
-            border: "none",
-            background: "transparent",
-            color: "#fff",
-            fontSize: 18,
-            cursor: "pointer",
+    <div
+      className={`bas-root bas-widget${className ? ` ${className}` : ""}`}
+      data-open={chat.open || undefined}
+      style={rootStyle}
+    >
+      {mounted ? (
+        <div
+          className="bas-panel"
+          data-open={visible || undefined}
+          role="dialog"
+          aria-label={title}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") chat.setOpen(false);
           }}
         >
-          {"×"}
-        </button>
-      </div>
-
-      <div ref={listRef} style={{ flex: 1, overflowY: "auto", padding: 12, minHeight: 160 }}>
-        {chat.messages.length === 0 ? (
-          <p style={{ color: "#6b7280", margin: 0 }}>{greeting}</p>
-        ) : (
-          chat.messages.map((message) => {
-            const outbound = isOutbound(message.authorType);
-            return (
-              <div
-                key={message.id}
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: outbound ? "flex-end" : "flex-start",
-                  marginBottom: 10,
-                }}
-              >
-                <span style={{ fontSize: 11, color: "#9ca3af", marginBottom: 2 }}>
-                  {authorLabel(message.authorType)}
-                </span>
-                <span
-                  style={{
-                    maxWidth: "80%",
-                    padding: "8px 10px",
-                    borderRadius: 10,
-                    background: outbound ? accentColor : "#f3f4f6",
-                    color: outbound ? "#fff" : "#111",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  {message.body}
-                </span>
+          <div className="bas-panel-header">
+            {avatar ?? <Avatar label={title} kind="agent" />}
+            <div className="bas-head-text">
+              <div className="bas-head-title">{title}</div>
+              <div className="bas-head-sub">
+                <span className="bas-status-dot" aria-hidden="true" />
+                {subtitle}
               </div>
-            );
-          })
-        )}
-      </div>
+            </div>
+            <button
+              type="button"
+              className="bas-head-close"
+              aria-label="Minimize support chat"
+              onClick={() => chat.setOpen(false)}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                <path d="M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
 
-      {chat.error ? (
-        <div style={{ padding: "6px 12px", color: "#b91c1c", fontSize: 12 }}>{chat.error}</div>
+          <Transcript
+            messages={chat.messages}
+            outbound={(m) => widgetOutbound(m.authorType)}
+            labelFor={(m) => widgetLabel(m.authorType, title)}
+            variant="widget"
+            scrollRef={listRef}
+            emptyState={greetingBlock}
+            {...(typing ? { typing: true } : {})}
+          />
+
+          {chat.error ? (
+            <div className="bas-error" role="alert">
+              {chat.error}
+            </div>
+          ) : null}
+
+          <Composer
+            value={draft}
+            onChange={setDraft}
+            onSubmit={submit}
+            placeholder={placeholder}
+            sending={chat.sending}
+            textareaRef={composerRef}
+            ariaLabel="Message"
+          />
+
+          {poweredBy ? <div className="bas-poweredby">{poweredBy}</div> : null}
+        </div>
       ) : null}
 
-      <form
-        onSubmit={submit}
-        style={{ display: "flex", gap: 8, padding: 10, borderTop: "1px solid #e5e7eb" }}
+      <button
+        type="button"
+        className="bas-launcher"
+        aria-label={chat.open ? "Close support chat" : "Open support chat"}
+        aria-expanded={chat.open}
+        onClick={() => chat.setOpen(!chat.open)}
       >
-        <input
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder={placeholder}
-          aria-label="Message"
-          style={{
-            flex: 1,
-            padding: "8px 10px",
-            border: "1px solid #d1d5db",
-            borderRadius: 8,
-            fontSize: 14,
-          }}
-        />
-        <button
-          type="submit"
-          disabled={chat.sending || draft.trim().length === 0}
-          style={{
-            border: "none",
-            borderRadius: 8,
-            padding: "0 14px",
-            background: accentColor,
-            color: "#fff",
-            cursor: "pointer",
-            opacity: chat.sending || draft.trim().length === 0 ? 0.6 : 1,
-          }}
-        >
-          {chat.sending ? "…" : "Send"}
-        </button>
-      </form>
+        {CHAT_ICON}
+        {CLOSE_ICON}
+      </button>
     </div>
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/* Reference agent inbox                                                      */
+/* Reference agent inbox (minimal alternative)                                */
 /* -------------------------------------------------------------------------- */
 
 export interface AgentInboxProps {
@@ -804,18 +1532,11 @@ export function useSupportInbox(options: UseSupportInboxOptions): UseSupportInbo
 }
 
 /* -------------------------------------------------------------------------- */
-/* Support dashboard (full agent console)                                     */
+/* SupportDashboard — Chatwoot-style agent console                            */
 /* -------------------------------------------------------------------------- */
 
-/** Restyle hooks for `<SupportDashboard/>`. All optional; defaults are neutral. */
-export interface SupportDashboardTheme {
-  accent?: string;
-  background?: string;
-  surface?: string;
-  border?: string;
-  text?: string;
-  mutedText?: string;
-}
+/** @deprecated alias kept for back-compat; use {@link SupportTheme}. */
+export type SupportDashboardTheme = SupportTheme;
 
 export interface SupportDashboardProps {
   /** A Better Auth client whose plugin exposes the `agent` namespace. */
@@ -826,29 +1547,20 @@ export interface SupportDashboardProps {
   initialStatus?: InboxStatusFilter;
   /** Applied to the root element for external styling. */
   className?: string;
-  /** Merged onto the root element's inline styles. */
+  /** Merged onto the root element's inline styles (after theme variables). */
   style?: React.CSSProperties;
-  /** Color overrides; merged over the neutral defaults. */
-  theme?: SupportDashboardTheme;
+  /** Color/surface/radius overrides; merged over strong defaults. */
+  theme?: SupportTheme;
 }
-
-const DEFAULT_DASHBOARD_THEME: Required<SupportDashboardTheme> = {
-  accent: "#2563eb",
-  background: "#f9fafb",
-  surface: "#ffffff",
-  border: "#e5e7eb",
-  text: "#111827",
-  mutedText: "#6b7280",
-};
 
 const STATUS_FILTERS: InboxStatusFilter[] = ["all", "open", "pending", "closed"];
 
 function inboxIdentity(item: InboxItem): string {
   return (
-    item.user?.email ||
     item.user?.name ||
-    item.visitorEmail ||
+    item.user?.email ||
     item.visitorName ||
+    item.visitorEmail ||
     item.visitorId ||
     "Anonymous visitor"
   );
@@ -859,15 +1571,10 @@ function assignedAgentLabel(item: InboxItem): string | null {
   return item.assignedAgent?.name || item.assignedAgent?.email || "an agent";
 }
 
-function statusColor(status: ConversationStatus, theme: Required<SupportDashboardTheme>): string {
-  if (status === "open") return theme.accent;
-  if (status === "pending") return "#d97706";
-  return theme.mutedText;
-}
-
 export function SupportDashboard(props: SupportDashboardProps): React.ReactElement {
+  useSupportStyles();
   const { client, title = "Support", pollIntervalMs, initialStatus, className, style } = props;
-  const theme = { ...DEFAULT_DASHBOARD_THEME, ...props.theme };
+  const theme: Required<SupportTheme> = { ...DEFAULT_THEME, ...props.theme };
 
   const inbox = useSupportInbox({
     client,
@@ -883,28 +1590,18 @@ export function SupportDashboard(props: SupportDashboardProps): React.ReactEleme
     if (el) el.scrollTop = el.scrollHeight;
   }, [inbox.thread]);
 
-  const submitReply = React.useCallback(
-    async (event: React.FormEvent) => {
-      event.preventDefault();
-      const text = draft.trim();
-      if (!text || inbox.sending) return;
-      setDraft("");
-      await inbox.reply(text);
-    },
-    [draft, inbox],
-  );
+  const submitReply = React.useCallback(async () => {
+    const text = draft.trim();
+    if (!text || inbox.sending) return;
+    setDraft("");
+    await inbox.reply(text);
+  }, [draft, inbox]);
+
+  const rootStyle: React.CSSProperties = { ...themeVars(theme), ...style };
 
   if (!client.agent) {
     return (
-      <div
-        className={className}
-        style={{
-          padding: 16,
-          fontFamily: "system-ui, sans-serif",
-          color: theme.text,
-          ...style,
-        }}
-      >
+      <div className={`bas-root${className ? ` ${className}` : ""}`} style={{ padding: 16, ...rootStyle }}>
         This client has no agent actions. Configure <code>supportClient()</code> and sign in as an
         agent.
       </div>
@@ -912,209 +1609,132 @@ export function SupportDashboard(props: SupportDashboardProps): React.ReactEleme
   }
 
   const conversation = inbox.thread?.conversation ?? null;
-  const stat = (label: string, value: number | string, color: string) => (
-    <div
-      key={label}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 2,
-        padding: "6px 14px 6px 0",
-        marginRight: 14,
-        borderRight: `1px solid ${theme.border}`,
-      }}
-    >
-      <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
-      <span style={{ fontSize: 11, textTransform: "uppercase", color: theme.mutedText }}>
-        {label}
-      </span>
-    </div>
-  );
+  const identity = conversation ? inboxIdentity({ ...conversation } as InboxItem) : "";
+  const agentDisplayName =
+    inbox.thread?.messages.find((m) => m.authorType === "agent") &&
+    inbox.items.find((i) => i.id === conversation?.id)?.assignedAgent?.name;
+
+  const dashLabel = (message: SupportMessage): string => {
+    if (message.authorType === "agent") return agentDisplayName || "You";
+    if (message.authorType === "ai") return "Assistant";
+    if (message.authorType === "system") return "System";
+    return identity || "Visitor";
+  };
+
+  const stats: Array<{ key: InboxStatusFilter; label: string; value: number | string }> = [
+    { key: "open", label: "Open", value: inbox.stats?.open ?? "–" },
+    { key: "pending", label: "Pending", value: inbox.stats?.pending ?? "–" },
+    { key: "closed", label: "Closed", value: inbox.stats?.closed ?? "–" },
+    { key: "all", label: "Total", value: inbox.stats?.total ?? "–" },
+  ];
 
   return (
     <div
-      className={className}
+      className={`bas-root bas-dash${className ? ` ${className}` : ""}`}
+      data-selected={inbox.selectedId ? "true" : undefined}
       role="region"
       aria-label={`${title} dashboard`}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        minHeight: 480,
-        fontFamily: "system-ui, sans-serif",
-        fontSize: 14,
-        color: theme.text,
-        background: theme.background,
-        border: `1px solid ${theme.border}`,
-        borderRadius: 10,
-        overflow: "hidden",
-        ...style,
-      }}
+      style={rootStyle}
     >
-      {/* Overview / stat row */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          padding: "12px 16px",
-          background: theme.surface,
-          borderBottom: `1px solid ${theme.border}`,
-        }}
-      >
-        <strong style={{ fontSize: 15, marginRight: 20 }}>{title}</strong>
-        {stat("Open", inbox.stats?.open ?? "–", theme.accent)}
-        {stat("Pending", inbox.stats?.pending ?? "–", "#d97706")}
-        {stat("Closed", inbox.stats?.closed ?? "–", theme.mutedText)}
-        {stat("Total", inbox.stats?.total ?? "–", theme.text)}
+      <div className="bas-dash-top">
+        <span className="bas-dash-title">{title}</span>
+        <div className="bas-stats">
+          {stats.map((s) => (
+            <button
+              key={s.key}
+              type="button"
+              className="bas-stat"
+              data-active={inbox.status === s.key || undefined}
+              onClick={() => inbox.setStatus(s.key)}
+            >
+              <span
+                className="bas-stat-num"
+                style={
+                  s.key === "open"
+                    ? { color: "var(--bas-accent)" }
+                    : s.key === "pending"
+                      ? { color: "#d97706" }
+                      : undefined
+                }
+              >
+                {s.value}
+              </span>
+              <span className="bas-stat-label">{s.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       {inbox.error ? (
-        <div
-          role="alert"
-          style={{ padding: "6px 16px", color: "#b91c1c", fontSize: 12, background: theme.surface }}
-        >
+        <div className="bas-error" role="alert">
           {inbox.error}
         </div>
       ) : null}
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-        {/* Conversation list pane */}
-        <div
-          style={{
-            width: 300,
-            display: "flex",
-            flexDirection: "column",
-            borderRight: `1px solid ${theme.border}`,
-            background: theme.surface,
-          }}
-        >
-          <div
-            role="tablist"
-            aria-label="Filter conversations by status"
-            style={{ display: "flex", gap: 4, padding: 8, borderBottom: `1px solid ${theme.border}` }}
-          >
-            {STATUS_FILTERS.map((filter) => {
-              const active = inbox.status === filter;
-              return (
-                <button
-                  key={filter}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => inbox.setStatus(filter)}
-                  style={{
-                    flex: 1,
-                    padding: "5px 8px",
-                    fontSize: 12,
-                    textTransform: "capitalize",
-                    border: "none",
-                    borderRadius: 6,
-                    cursor: "pointer",
-                    background: active ? theme.accent : "transparent",
-                    color: active ? "#fff" : theme.mutedText,
-                    fontWeight: active ? 600 : 400,
-                  }}
-                >
-                  {filter}
-                </button>
-              );
-            })}
+      <div className="bas-dash-body">
+        <aside className="bas-list" aria-label="Conversations">
+          <div className="bas-tabs" role="tablist" aria-label="Filter conversations by status">
+            {STATUS_FILTERS.map((filter) => (
+              <button
+                key={filter}
+                type="button"
+                role="tab"
+                aria-selected={inbox.status === filter}
+                className="bas-tab"
+                data-active={inbox.status === filter || undefined}
+                onClick={() => inbox.setStatus(filter)}
+              >
+                {filter}
+              </button>
+            ))}
           </div>
 
-          <div style={{ flex: 1, overflowY: "auto" }} aria-busy={inbox.loading}>
-            <div
-              style={{
-                padding: "6px 12px",
-                fontSize: 11,
-                color: theme.mutedText,
-                borderBottom: `1px solid ${theme.border}`,
-              }}
-            >
-              {inbox.items.length} of {inbox.total}
-            </div>
+          <div className="bas-list-count">
+            {inbox.items.length} of {inbox.total}
+          </div>
+
+          <div className="bas-list-scroll" aria-busy={inbox.loading}>
             {inbox.items.length === 0 ? (
-              <div style={{ padding: 14, color: theme.mutedText }}>No conversations.</div>
+              <div className="bas-empty">
+                {inbox.loading ? "Loading conversations…" : "No conversations here yet."}
+              </div>
             ) : (
               <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
                 {inbox.items.map((item) => {
                   const selected = item.id === inbox.selectedId;
+                  const name = inboxIdentity(item);
                   const agentLabel = assignedAgentLabel(item);
                   return (
                     <li key={item.id}>
                       <button
                         type="button"
+                        className="bas-row"
+                        data-selected={selected || undefined}
+                        data-unread={item.unread || undefined}
                         aria-current={selected}
                         onClick={() => inbox.select(item.id)}
-                        style={{
-                          display: "block",
-                          width: "100%",
-                          textAlign: "left",
-                          padding: "10px 12px",
-                          border: "none",
-                          borderLeft: `3px solid ${selected ? theme.accent : "transparent"}`,
-                          borderBottom: `1px solid ${theme.border}`,
-                          background: selected ? "#eff6ff" : "transparent",
-                          cursor: "pointer",
-                          color: theme.text,
-                        }}
                       >
-                        <div
-                          style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}
-                        >
-                          {item.unread ? (
-                            <span
-                              aria-label="Unread"
-                              title="Awaiting reply"
-                              style={{
-                                width: 8,
-                                height: 8,
-                                borderRadius: "50%",
-                                background: theme.accent,
-                                flex: "0 0 auto",
-                              }}
-                            />
-                          ) : null}
-                          <span
-                            style={{
-                              fontWeight: item.unread ? 700 : 600,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {inboxIdentity(item)}
+                        <Avatar label={name} kind="visitor" />
+                        <span className="bas-row-main">
+                          <span className="bas-row-top">
+                            <span className="bas-row-name">{name}</span>
+                            <span className="bas-row-time">{relativeTime(item.lastMessageAt)}</span>
                           </span>
-                        </div>
-                        {item.lastMessagePreview ? (
-                          <div
-                            style={{
-                              fontSize: 12,
-                              color: theme.mutedText,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {item.lastMessagePreview}
-                          </div>
+                          {item.lastMessagePreview ? (
+                            <span className="bas-row-preview">{item.lastMessagePreview}</span>
+                          ) : null}
+                          <span className="bas-row-meta">
+                            <span className="bas-pill" data-status={item.status}>
+                              {item.status}
+                            </span>
+                            {agentLabel ? (
+                              <span className="bas-pill-agent">· {agentLabel}</span>
+                            ) : null}
+                          </span>
+                        </span>
+                        {item.unread ? (
+                          <span className="bas-unread-dot" aria-label="Unread" title="Awaiting reply" />
                         ) : null}
-                        <div style={{ display: "flex", gap: 6, marginTop: 4, fontSize: 11 }}>
-                          <span
-                            style={{
-                              color: "#fff",
-                              background: statusColor(item.status, theme),
-                              borderRadius: 4,
-                              padding: "1px 6px",
-                              textTransform: "capitalize",
-                            }}
-                          >
-                            {item.status}
-                          </span>
-                          {agentLabel ? (
-                            <span style={{ color: theme.mutedText }}>· {agentLabel}</span>
-                          ) : null}
-                        </div>
                       </button>
                     </li>
                   );
@@ -1122,155 +1742,70 @@ export function SupportDashboard(props: SupportDashboardProps): React.ReactEleme
               </ul>
             )}
           </div>
-        </div>
+        </aside>
 
-        {/* Thread pane */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <section className="bas-thread" aria-label="Conversation">
           {!conversation ? (
-            <div style={{ padding: 20, color: theme.mutedText }}>
+            <div className="bas-empty" style={{ margin: "auto" }}>
               Select a conversation to view the thread.
             </div>
           ) : (
             <>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "10px 14px",
-                  background: theme.surface,
-                  borderBottom: `1px solid ${theme.border}`,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div
-                    style={{
-                      fontWeight: 600,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {conversation.subject || conversation.visitorEmail || "Conversation"}
-                  </div>
-                  <div style={{ fontSize: 12, color: theme.mutedText }}>
-                    {conversation.status}
-                    {conversation.assignedAgentId ? " · assigned" : " · unassigned"}
+              <div className="bas-thread-head">
+                <button
+                  type="button"
+                  className="bas-btn bas-back"
+                  aria-label="Back to inbox"
+                  onClick={() => inbox.select(null)}
+                >
+                  ←
+                </button>
+                <Avatar label={identity} kind="visitor" />
+                <div className="bas-thread-id">
+                  <div className="bas-thread-name">{identity}</div>
+                  <div className="bas-thread-sub">
+                    <span className="bas-pill" data-status={conversation.status}>
+                      {conversation.status}
+                    </span>{" "}
+                    {conversation.assignedAgentId ? "· assigned" : "· unassigned"}
+                    {conversation.visitorEmail ? ` · ${conversation.visitorEmail}` : ""}
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 8, flex: "0 0 auto" }}>
-                  <button
-                    type="button"
-                    onClick={() => void inbox.assign()}
-                    style={{
-                      border: `1px solid ${theme.border}`,
-                      borderRadius: 6,
-                      background: theme.surface,
-                      color: theme.text,
-                      padding: "4px 10px",
-                      cursor: "pointer",
-                    }}
-                  >
+                <div className="bas-actions">
+                  <button type="button" className="bas-btn" onClick={() => void inbox.assign()}>
                     Assign to me
                   </button>
                   <button
                     type="button"
+                    className="bas-btn"
                     onClick={() => void inbox.close()}
                     disabled={conversation.status === "closed"}
-                    style={{
-                      border: `1px solid ${theme.border}`,
-                      borderRadius: 6,
-                      background: theme.surface,
-                      color: theme.text,
-                      padding: "4px 10px",
-                      cursor: conversation.status === "closed" ? "default" : "pointer",
-                      opacity: conversation.status === "closed" ? 0.5 : 1,
-                    }}
                   >
                     Close
                   </button>
                 </div>
               </div>
 
-              <div ref={listRef} style={{ flex: 1, overflowY: "auto", padding: 14 }}>
-                {inbox.thread?.messages.map((message) => {
-                  const fromAgentSide =
-                    message.authorType === "agent" || message.authorType === "ai";
-                  return (
-                    <div
-                      key={message.id}
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: fromAgentSide ? "flex-end" : "flex-start",
-                        marginBottom: 10,
-                      }}
-                    >
-                      <span style={{ fontSize: 11, color: theme.mutedText, marginBottom: 2 }}>
-                        {message.authorType}
-                      </span>
-                      <span
-                        style={{
-                          maxWidth: "75%",
-                          padding: "8px 10px",
-                          borderRadius: 10,
-                          background: fromAgentSide ? theme.accent : "#f3f4f6",
-                          color: fromAgentSide ? "#fff" : "#111",
-                          whiteSpace: "pre-wrap",
-                          wordBreak: "break-word",
-                        }}
-                      >
-                        {message.body}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+              <Transcript
+                messages={inbox.thread?.messages ?? []}
+                outbound={(m) => m.authorType === "agent" || m.authorType === "ai"}
+                labelFor={dashLabel}
+                variant="dash"
+                scrollRef={listRef}
+              />
 
-              <form
+              <Composer
+                value={draft}
+                onChange={setDraft}
                 onSubmit={submitReply}
-                style={{
-                  display: "flex",
-                  gap: 8,
-                  padding: 10,
-                  background: theme.surface,
-                  borderTop: `1px solid ${theme.border}`,
-                }}
-              >
-                <input
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  placeholder="Reply to the customer…"
-                  aria-label="Reply"
-                  style={{
-                    flex: 1,
-                    padding: "8px 10px",
-                    border: `1px solid ${theme.border}`,
-                    borderRadius: 8,
-                    fontSize: 14,
-                    color: theme.text,
-                  }}
-                />
-                <button
-                  type="submit"
-                  disabled={inbox.sending || draft.trim().length === 0}
-                  style={{
-                    border: "none",
-                    borderRadius: 8,
-                    padding: "0 16px",
-                    background: theme.accent,
-                    color: "#fff",
-                    cursor: "pointer",
-                    opacity: inbox.sending || draft.trim().length === 0 ? 0.6 : 1,
-                  }}
-                >
-                  {inbox.sending ? "…" : "Send"}
-                </button>
-              </form>
+                placeholder="Reply to the customer…"
+                sending={inbox.sending}
+                disabled={conversation.status === "closed"}
+                ariaLabel="Reply"
+              />
             </>
           )}
-        </div>
+        </section>
       </div>
     </div>
   );
