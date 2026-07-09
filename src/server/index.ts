@@ -1,5 +1,5 @@
 /**
- * `better-auth-support/server` — the Better Auth support-chat plugin.
+ * `better-auth-support/server` — the Better Auth support plugin.
  *
  * Identity comes from Better Auth itself: conversations link to `user.id`, and
  * the agent inbox joins back to the `user` table. Pre-auth visitors are tracked
@@ -7,7 +7,7 @@
  * a human on `null`. Agent endpoints are role-gated (composes with the Better
  * Auth `admin` plugin).
  *
- * Realtime is poll-based in v0: clients re-fetch `/support-chat/conversation`.
+ * Realtime is poll-based in v0: clients re-fetch `/support/conversation`.
  * See the README for the serverless/SSE caveats.
  */
 import type { GenericEndpointContext, BetterAuthPlugin } from "@better-auth/core";
@@ -19,6 +19,7 @@ import type {
   InboxUser,
   SupportConversation,
   SupportMessage,
+  SupportStats,
 } from "../types.js";
 
 export type {
@@ -49,7 +50,7 @@ export interface SupportNotifyHooks {
   ) => void | Promise<void>;
 }
 
-export interface SupportChatOptions {
+export interface SupportOptions {
   /**
    * Role permitted to use the agent endpoints. Defaults to `"admin"`, which
    * composes with the Better Auth admin plugin. The guard checks
@@ -204,6 +205,57 @@ async function loadMessages(adapter: Adapter, conversationId: string): Promise<S
   });
 }
 
+/** The most recent message in a conversation, or null when empty. */
+async function latestMessage(
+  adapter: Adapter,
+  conversationId: string,
+): Promise<SupportMessage | null> {
+  const rows = await adapter.findMany<SupportMessage>({
+    model: MESSAGE,
+    where: [{ field: "conversationId", value: conversationId }],
+    sortBy: { field: "createdAt", direction: "desc" },
+    limit: 1,
+  });
+  return rows[0] ?? null;
+}
+
+const PREVIEW_MAX = 140;
+
+/** Collapse whitespace and truncate a message body for list previews. */
+function previewOf(body: string): string {
+  const trimmed = body.trim().replace(/\s+/g, " ");
+  return trimmed.length > PREVIEW_MAX ? `${trimmed.slice(0, PREVIEW_MAX - 1)}…` : trimmed;
+}
+
+/** Inbound = authored by the visitor/user (i.e. awaiting an agent reply). */
+function isInbound(authorType: SupportMessage["authorType"]): boolean {
+  return authorType === "visitor" || authorType === "user";
+}
+
+/** Resolve a user id to the minimal inbox identity, memoized per request. */
+async function resolveInboxUser(
+  adapter: Adapter,
+  userId: string | null | undefined,
+  cache: Map<string, InboxUser | null>,
+): Promise<InboxUser | null> {
+  if (!userId) return null;
+  if (cache.has(userId)) return cache.get(userId) ?? null;
+  const row = await adapter.findOne<Record<string, unknown>>({
+    model: USER,
+    where: [{ field: "id", value: userId }],
+  });
+  const user: InboxUser | null = row
+    ? {
+        id: String(row["id"]),
+        email: String(row["email"] ?? ""),
+        name: String(row["name"] ?? ""),
+        role: readRole(row),
+      }
+    : null;
+  cache.set(userId, user);
+  return user;
+}
+
 /** Patch a conversation and bump `lastMessageAt`. Returns the fresh row. */
 async function updateConversation(
   adapter: Adapter,
@@ -231,7 +283,7 @@ async function runHook(
   try {
     await fn();
   } catch (error) {
-    ctx.context.logger.error(`[support-chat] ${label} failed`, error);
+    ctx.context.logger.error(`[support] ${label} failed`, error);
   }
 }
 
@@ -239,7 +291,7 @@ async function runHook(
 /* Plugin                                                                     */
 /* -------------------------------------------------------------------------- */
 
-export const supportChat = (opts: SupportChatOptions = {}) => {
+export const support = (opts: SupportOptions = {}) => {
   const agentRole = opts.agentRole ?? "admin";
   const allowAnonymous = opts.anonymous ?? true;
 
@@ -253,7 +305,7 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
   };
 
   return {
-    id: "support-chat",
+    id: "support",
     schema: {
       supportConversation: {
         fields: {
@@ -282,7 +334,7 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
     endpoints: {
       /* ---- visitor / user ------------------------------------------------ */
       sendMessage: createAuthEndpoint(
-        "/support-chat/message",
+        "/support/message",
         {
           method: "POST",
           metadata: {
@@ -347,7 +399,7 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
               try {
                 reply = await opts.aiResponder(text, ctx);
               } catch (error) {
-                ctx.context.logger.error("[support-chat] aiResponder failed", error);
+                ctx.context.logger.error("[support] aiResponder failed", error);
               }
               if (reply && reply.trim()) {
                 const aiMessage = await insertMessage(
@@ -382,7 +434,7 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
       ),
 
       getConversation: createAuthEndpoint(
-        "/support-chat/conversation",
+        "/support/conversation",
         {
           method: "GET",
           metadata: { $Infer: { query: {} as { conversationId?: string } } },
@@ -422,7 +474,7 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
       ),
 
       identify: createAuthEndpoint(
-        "/support-chat/identify",
+        "/support/identify",
         {
           method: "POST",
           metadata: { $Infer: { body: {} as { email: string; name?: string } } },
@@ -452,60 +504,86 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
 
       /* ---- agent (role-gated) ------------------------------------------- */
       inbox: createAuthEndpoint(
-        "/support-chat/inbox",
+        "/support/inbox",
         {
           method: "GET",
           use: [sessionMiddleware],
-          metadata: { $Infer: { query: {} as { status?: ConversationStatus; limit?: string } } },
+          metadata: {
+            $Infer: {
+              query: {} as { status?: ConversationStatus; limit?: string; offset?: string },
+            },
+          },
         },
         async (ctx) => {
           requireAgent(ctx);
           const adapter = ctx.context.adapter;
 
           const status = ctx.query?.status;
+          const where = status ? [{ field: "status", value: status }] : undefined;
           const limitRaw = ctx.query?.limit;
           const limit = limitRaw ? Math.min(Math.max(Number(limitRaw) || 0, 1), 200) : 50;
+          const offsetRaw = ctx.query?.offset;
+          const offset = offsetRaw ? Math.max(Number(offsetRaw) || 0, 0) : 0;
 
           const conversations = await adapter.findMany<SupportConversation>({
             model: CONVERSATION,
-            where: status ? [{ field: "status", value: status }] : undefined,
+            where,
             sortBy: { field: "lastMessageAt", direction: "desc" },
             limit,
+            offset,
           });
+          const total = await adapter.count({ model: CONVERSATION, where });
 
           const userCache = new Map<string, InboxUser | null>();
           const items: InboxItem[] = [];
           for (const conversation of conversations) {
-            let user: InboxUser | null = null;
-            const userId = conversation.userId;
-            if (userId) {
-              if (userCache.has(userId)) {
-                user = userCache.get(userId) ?? null;
-              } else {
-                const row = await adapter.findOne<Record<string, unknown>>({
-                  model: USER,
-                  where: [{ field: "id", value: userId }],
-                });
-                user = row
-                  ? {
-                      id: String(row["id"]),
-                      email: String(row["email"] ?? ""),
-                      name: String(row["name"] ?? ""),
-                      role: readRole(row),
-                    }
-                  : null;
-                userCache.set(userId, user);
-              }
-            }
-            items.push({ ...conversation, user });
+            const user = await resolveInboxUser(adapter, conversation.userId, userCache);
+            const assignedAgent = await resolveInboxUser(
+              adapter,
+              conversation.assignedAgentId,
+              userCache,
+            );
+            const last = await latestMessage(adapter, conversation.id);
+            items.push({
+              ...conversation,
+              user,
+              assignedAgent,
+              lastMessagePreview: last ? previewOf(last.body) : null,
+              unread: last ? isInbound(last.authorType) && conversation.status !== "closed" : false,
+            });
           }
 
-          return ctx.json({ conversations: items });
+          return ctx.json({ conversations: items, total });
+        },
+      ),
+
+      stats: createAuthEndpoint(
+        "/support/stats",
+        {
+          method: "GET",
+          use: [sessionMiddleware],
+        },
+        async (ctx) => {
+          requireAgent(ctx);
+          const adapter = ctx.context.adapter;
+
+          const countStatus = (value: ConversationStatus) =>
+            adapter.count({ model: CONVERSATION, where: [{ field: "status", value }] });
+
+          const [open, pending, closed, total] = await Promise.all([
+            countStatus("open"),
+            countStatus("pending"),
+            countStatus("closed"),
+            adapter.count({ model: CONVERSATION }),
+          ]);
+
+          const stats: SupportStats = { open, pending, closed, total };
+          return ctx.json(stats);
         },
       ),
 
       reply: createAuthEndpoint(
-        "/support-chat/reply",
+        "/support/reply",
         {
           method: "POST",
           use: [sessionMiddleware],
@@ -538,7 +616,7 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
       ),
 
       assign: createAuthEndpoint(
-        "/support-chat/assign",
+        "/support/assign",
         {
           method: "POST",
           use: [sessionMiddleware],
@@ -566,7 +644,7 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
       ),
 
       close: createAuthEndpoint(
-        "/support-chat/close",
+        "/support/close",
         {
           method: "POST",
           use: [sessionMiddleware],
@@ -594,10 +672,10 @@ export const supportChat = (opts: SupportChatOptions = {}) => {
       ),
     },
     rateLimit: [
-      { pathMatcher: (path: string) => path === "/support-chat/message", max: 20, window: 60 },
-      { pathMatcher: (path: string) => path === "/support-chat/identify", max: 10, window: 60 },
+      { pathMatcher: (path: string) => path === "/support/message", max: 20, window: 60 },
+      { pathMatcher: (path: string) => path === "/support/identify", max: 10, window: 60 },
     ],
   } satisfies BetterAuthPlugin;
 };
 
-export type SupportChat = ReturnType<typeof supportChat>;
+export type SupportPlugin = ReturnType<typeof support>;

@@ -66,11 +66,28 @@ export interface InboxUser {
 
 /** A conversation enriched with the Better Auth identity behind it. */
 export interface InboxItem extends SupportConversation {
+  /** The visitor/user identity behind the conversation, when logged in. */
   user: InboxUser | null;
+  /** The agent this conversation is assigned to, resolved from `user`. */
+  assignedAgent?: InboxUser | null;
+  /** Body of the most recent message, truncated for list previews. */
+  lastMessagePreview?: string | null;
+  /** True when the latest message is inbound (awaiting an agent reply). */
+  unread?: boolean;
 }
 
 export interface InboxResult {
   conversations: InboxItem[];
+  /** Total conversations matching the filter (for pagination). */
+  total?: number;
+}
+
+/** Aggregate counts for the dashboard overview row. */
+export interface SupportStats {
+  open: number;
+  pending: number;
+  closed: number;
+  total: number;
 }
 
 export interface ReplyResult {
@@ -106,6 +123,8 @@ export interface IdentifyInput {
 export interface InboxQuery {
   status?: ConversationStatus;
   limit?: number;
+  /** Number of conversations to skip, for pagination. */
+  offset?: number;
 }
 
 export interface ReplyInput {
@@ -153,6 +172,7 @@ export type Unsubscribe = () => void;
 /** Agent-only actions, gated server-side by the `agentRole` guard. */
 export interface SupportAgentActions {
   inbox: (query?: InboxQuery) => Promise<FetchResult<InboxResult>>;
+  stats: () => Promise<FetchResult<SupportStats>>;
   reply: (input: ReplyInput) => Promise<FetchResult<ReplyResult>>;
   assign: (input: AssignInput) => Promise<FetchResult<ConversationResult>>;
   close: (input: CloseInput) => Promise<FetchResult<ConversationResult>>;
@@ -160,7 +180,7 @@ export interface SupportAgentActions {
 
 /**
  * The structural client shape the React components depend on. Any Better Auth
- * client configured with `supportChatClient()` satisfies this — the components
+ * client configured with `supportClient()` satisfies this — the components
  * accept it via a `client` prop so they stay framework-plumbing agnostic.
  */
 export interface SupportClient {

@@ -3,12 +3,12 @@
  *
  * Exposes typed actions on the auth client: `sendMessage`, `getConversation`,
  * a poll-based `subscribe`, `identify`, and the agent namespace
- * (`agent.{inbox,reply,assign,close}`). Types are inferred from the server
- * plugin via `$InferServerPlugin`.
+ * (`agent.{inbox,stats,reply,assign,close}`). Types are inferred from the
+ * server plugin via `$InferServerPlugin`.
  */
 import type { BetterAuthClientPlugin } from "@better-auth/core";
 
-import type { supportChat } from "../server/index.js";
+import type { support } from "../server/index.js";
 import type {
   AssignInput,
   CloseInput,
@@ -23,6 +23,7 @@ import type {
   ReplyResult,
   SendMessageInput,
   SubscribeOptions,
+  SupportStats,
   Unsubscribe,
 } from "../types.js";
 
@@ -45,40 +46,42 @@ export type {
   SupportClient,
   SupportConversation,
   SupportMessage,
+  SupportStats,
   Unsubscribe,
 } from "../types.js";
 
 const DEFAULT_POLL_MS = 3000;
 
-export const supportChatClient = () => {
+export const supportClient = () => {
   return {
-    id: "support-chat",
-    $InferServerPlugin: {} as ReturnType<typeof supportChat>,
+    id: "support",
+    $InferServerPlugin: {} as ReturnType<typeof support>,
     // Force the HTTP method for endpoints the client infers from the server plugin.
     pathMethods: {
-      "/support-chat/conversation": "GET",
-      "/support-chat/inbox": "GET",
-      "/support-chat/message": "POST",
-      "/support-chat/identify": "POST",
-      "/support-chat/reply": "POST",
-      "/support-chat/assign": "POST",
-      "/support-chat/close": "POST",
+      "/support/conversation": "GET",
+      "/support/inbox": "GET",
+      "/support/stats": "GET",
+      "/support/message": "POST",
+      "/support/identify": "POST",
+      "/support/reply": "POST",
+      "/support/assign": "POST",
+      "/support/close": "POST",
     },
     getActions: ($fetch) => ({
       sendMessage: (input: SendMessageInput) =>
-        $fetch<ConversationThread>("/support-chat/message", {
+        $fetch<ConversationThread>("/support/message", {
           method: "POST",
           body: input,
         }),
 
       getConversation: (query?: ConversationQuery) =>
-        $fetch<ConversationThread>("/support-chat/conversation", {
+        $fetch<ConversationThread>("/support/conversation", {
           method: "GET",
           query,
         }),
 
       identify: (input: IdentifyInput) =>
-        $fetch<ConversationResult>("/support-chat/identify", {
+        $fetch<ConversationResult>("/support/identify", {
           method: "POST",
           body: input,
         }),
@@ -101,7 +104,7 @@ export const supportChatClient = () => {
         const tick = async (): Promise<void> => {
           if (!active) return;
           try {
-            const res = (await $fetch<ConversationThread>("/support-chat/conversation", {
+            const res = (await $fetch<ConversationThread>("/support/conversation", {
               method: "GET",
               query: options.conversationId
                 ? { conversationId: options.conversationId }
@@ -121,16 +124,17 @@ export const supportChatClient = () => {
 
       agent: {
         inbox: (query?: InboxQuery) =>
-          $fetch<InboxResult>("/support-chat/inbox", { method: "GET", query }),
+          $fetch<InboxResult>("/support/inbox", { method: "GET", query }),
+        stats: () => $fetch<SupportStats>("/support/stats", { method: "GET" }),
         reply: (input: ReplyInput) =>
-          $fetch<ReplyResult>("/support-chat/reply", { method: "POST", body: input }),
+          $fetch<ReplyResult>("/support/reply", { method: "POST", body: input }),
         assign: (input: AssignInput) =>
-          $fetch<ConversationResult>("/support-chat/assign", { method: "POST", body: input }),
+          $fetch<ConversationResult>("/support/assign", { method: "POST", body: input }),
         close: (input: CloseInput) =>
-          $fetch<ConversationResult>("/support-chat/close", { method: "POST", body: input }),
+          $fetch<ConversationResult>("/support/close", { method: "POST", body: input }),
       },
     }),
   } satisfies BetterAuthClientPlugin;
 };
 
-export type SupportChatClient = ReturnType<typeof supportChatClient>;
+export type SupportClientPlugin = ReturnType<typeof supportClient>;
