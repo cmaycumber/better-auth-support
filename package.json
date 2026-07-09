@@ -4,6 +4,12 @@
   "description": "Self-hosted, embeddable support chat + agent inbox that plugs directly into a Better Auth app. Identity, users and agent roles come from Better Auth itself; ships an AI-first-responder hook and a headless React widget.",
   "author": "Automatons, LLC",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cmaycumber/better-auth-support.git"
+  },
+  "homepage": "https://github.com/cmaycumber/better-auth-support#readme",
+  "bugs": "https://github.com/cmaycumber/better-auth-support/issues",
   "type": "module",
   "sideEffects": false,
   "keywords": [
@@ -41,7 +47,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "prepare": "tsup"
   },
   "peerDependencies": {
     "better-auth": ">=1.2.0",
